@@ -10,7 +10,7 @@
 import re
 from title_master_list import TITLE_LIST, PARTY_NAMES, BARE_OTHER_WORDS, COMMON_SURNAMES
 
-QUOTE_PAT = re.compile(r'"[^"]*"')
+QUOTE_PAT = re.compile(r'"[^"]*"|“[^”]*”')
 SINGLE_QUOTE_SPAN = re.compile(r'[\u2018\u2019\']')
 COMPOUND_PREFIX_BLACKLIST = {'국무', '국회', '지방', '자치', '정부', '청와대', '국방', '법무'}
 ASK_VERB = re.compile(r'(묻자|물었다|질문했다|물어봤다)')
@@ -35,7 +35,9 @@ class Stage1Extractor:
 
         title_pat = r'(?:' + '|'.join(sorted(set(TITLE_LIST), key=len, reverse=True)) + r')'
         party_alt = '|'.join(PARTY_NAMES)
-        connector = r'(?:\s?\([^)]{0,30}\))?(?:\s전)?(?:\s(?:' + party_alt + r'))?\s?'
+        # 복합 직함(예: '당 대표 비서실장', '원내대표 비서실장')의 앞부분을 위한 선택적 삽입 허용
+        title_prefix = r'(?:당\s?대표|원내대표|최고위원|위원장|대표)?\s?'
+        connector = r'(?:\s?\([^)]{0,30}\))?(?:\s전)?(?:\s(?:' + party_alt + r'))?\s?' + title_prefix
         josa = r'(은|는|이|가|도|또한|역시)'
         end = r'(?=[\s,.\"“”‘’]|$)'
 
@@ -86,7 +88,8 @@ class Stage1Extractor:
             candidates.append((m.start(), 'designated', m.group(1)))
         for m in self.ANY_NAME_TITLE_PAT.finditer(span):
             if m.group(1) != self.designated and m.group(1) not in PARTY_NAMES \
-                    and m.group(1) not in COMPOUND_PREFIX_BLACKLIST:
+                    and m.group(1) not in COMPOUND_PREFIX_BLACKLIST \
+                    and m.group(1) not in TITLE_LIST:
                 candidates.append((m.start(), 'other', m.group(2)))
 
         bare_low_confidence = []  # 기관/집단 명사: 언급 vs 화자 모호 -> 자동제외 대신 항상 검토 표시

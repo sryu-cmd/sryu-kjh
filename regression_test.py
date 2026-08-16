@@ -12,9 +12,9 @@ BASELINE = {
     '이해찬': {'input_file': '/mnt/user-data/uploads/업로드용_파일_이해찬_20200101_20200331_조중동_.csv',
              'surname': '이', 'expected_final_groups': 591},  # 2026-08 자기지시배제 규칙 반영 후 갱신
     '이준석1': {'input_file': '/mnt/user-data/uploads/업로드용파일_20250629_074058_이준석_20200902_-_20210610_검토후조중동.csv',
-             'name': '이준석', 'surname': '이', 'expected_final_groups': 667},  # 2026-08 문맥승계+은는우선순위 규칙 반영 후 갱신
+             'name': '이준석', 'surname': '이', 'expected_final_groups': 664},  # 2026-08 부위원장/제3자성씨패턴 반영 후 갱신
     '이낙연': {'input_file': '/mnt/user-data/uploads/업로드용파일_20251020_103221_이낙연_20230912_-_20240111_검토후조중동.csv',
-             'surname': '이', 'expected_final_groups': 370},  # 2026-08 공백계산버그 수정 후 갱신
+             'surname': '이', 'expected_final_groups': 372},  # 2026-08 굽은따옴표 인식 반영 후 갱신  # 2026-08 공백계산버그 수정 후 갱신
     '이인영': {'input_file': '/mnt/user-data/uploads/업로드용파일_20251021_003535_이인영_20230904_-_20251020_검토후.csv',
              'surname': '이', 'expected_final_groups': 99},  # 2B 수동판단 반영 전 순수자동 기준값
     '이언주': {'input_file': '/mnt/user-data/uploads/업로드용파일_20251020_172437_이언주_20250801_-_20251020_검토후조중동.csv',

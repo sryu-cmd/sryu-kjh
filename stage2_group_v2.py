@@ -142,7 +142,8 @@ def run_stage2A(rows, header):
             label, reason = classify_pair(f_text, prev_f, cur_paragraph)
         out_rows.append(r + [label, reason])
         prev_key = key
-        prev_f = f_text
+        if f_text.strip():
+            prev_f = f_text
     return out_rows
 
 
