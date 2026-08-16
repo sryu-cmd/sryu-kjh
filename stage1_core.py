@@ -8,7 +8,7 @@
     kept_quotes, review_flag, review_note = ex.extract_row(f_text)
 """
 import re
-from title_master_list import TITLE_LIST, PARTY_NAMES, BARE_OTHER_WORDS
+from title_master_list import TITLE_LIST, PARTY_NAMES, BARE_OTHER_WORDS, COMMON_SURNAMES
 
 QUOTE_PAT = re.compile(r'"[^"]*"')
 SINGLE_QUOTE_SPAN = re.compile(r'[\u2018\u2019\']')
@@ -42,7 +42,17 @@ class Stage1Extractor:
         self.FULLNAME_TITLE_PAT = re.compile(re.escape(designated) + connector + r'(?:' + title_pat + r')?' + josa + end)
         self.ANY_NAME_TITLE_PAT = re.compile(r'([가-힣]{2,6})' + connector + r'(?:' + title_pat + r')' + josa + end)
         self.SURNAME_TITLE_PAT = re.compile(surname + connector + r'(?:' + title_pat + r')' + josa + end)
+        # 지정발언자가 아닌 '다른 사람'의 성(1글자)+직함 (예: "조 장관은", "최 대표는") -
+        # 흔한 한국 성씨 목록으로 한정해 오탐 위험을 낮춘다 (임의의 한 글자를 성으로 보지 않는다).
+        common_surnames = [s for s in COMMON_SURNAMES if s != surname]
+        self.GENERIC_OTHER_SURNAME_PAT = re.compile(
+            r'(?<![가-힣])(' + '|'.join(common_surnames) + r')\s?(?:' + title_pat + r')' + josa + end
+        )
         self.BARE_OTHER_PAT = re.compile(r'(' + '|'.join(sorted(BARE_OTHER_WORDS, key=len, reverse=True)) + r')(은|는|이|가|도)' + end)
+        # '[누구] 측이/은/는/도' (예: "문 전 대통령 측이", "회사 측은") - 대변인격 제3자 표현
+        self.SIDE_PAT = re.compile(r'[가-힣]{1,8}\s?측(은|는|이|가|도)' + end)
+        # '[누구] 의원실이/은/는/도' - 의원 본인이 아닌 보좌진/사무실 명의 - 별개의 제3자로 취급
+        self.OFFICE_PAT = re.compile(r'[가-힣]{1,8}\s?의원실(은|는|이|가|도)' + end)
         # 자기지시 배제용: 인용문 '내용 안'에서 [지정발언자 성명+호칭]을 찾는다 (조사 유무 무관, 문장 어디든)
         self.SELF_REFERENCE_PAT = re.compile(re.escape(designated) + r'\s?(?:전\s)?' + title_pat)
 
@@ -59,14 +69,26 @@ class Stage1Extractor:
             i += 2
         return ''.join(result)
 
-    def _classify_span(self, raw_span):
+    BOUNDARY_PHRASES = ('에 대해', '데 대해', '와 관련해', '과 관련해', '을 두고', '를 두고',
+                        '에 관해', '데 관해')
+
+    QUOTATIVE_VERB_PAT = re.compile(
+        r'^[^"]{0,6}(?:이|가|라)?(?:라고|고)?\s?(?:발언한|말한|주장한|지적한|비판한|밝힌|반박한|언급한|강조한|덧붙인)'
+    )
+
+    def _classify_span(self, raw_span, lookahead=''):
         span = self._mask_single_quoted(raw_span)
-        matches = list(self.FULLNAME_TITLE_PAT.finditer(span))
-        last_full = matches[-1].start() if matches else -1
-        other_matches = [(m.start(), m.group(1)) for m in self.ANY_NAME_TITLE_PAT.finditer(span)
-                          if m.group(1) != self.designated and m.group(1) not in PARTY_NAMES
-                          and m.group(1) not in COMPOUND_PREFIX_BLACKLIST]
-        bare_matches = []
+        candidates = []  # (pos, kind, josa)
+
+        for m in self.FULLNAME_TITLE_PAT.finditer(span):
+            candidates.append((m.start(), 'designated', m.group(1)))
+        for m in self.SURNAME_TITLE_PAT.finditer(span):
+            candidates.append((m.start(), 'designated', m.group(1)))
+        for m in self.ANY_NAME_TITLE_PAT.finditer(span):
+            if m.group(1) != self.designated and m.group(1) not in PARTY_NAMES \
+                    and m.group(1) not in COMPOUND_PREFIX_BLACKLIST:
+                candidates.append((m.start(), 'other', m.group(2)))
+
         bare_low_confidence = []  # 기관/집단 명사: 언급 vs 화자 모호 -> 자동제외 대신 항상 검토 표시
         LOW_CONFIDENCE_WORDS = {'민주당', '더불어민주당', '국민의힘', '국힘', '야당', '여당', '여권',
                                  '범여권', '야권', '범야권', '측근', '일각', '가족', '대통령실'}
@@ -79,18 +101,53 @@ class Stage1Extractor:
             if word in LOW_CONFIDENCE_WORDS:
                 bare_low_confidence.append(m.start())
                 continue
-            bare_matches.append(m.start())
-        surname_matches = [m.start() for m in self.SURNAME_TITLE_PAT.finditer(span)]
-        last_other = max([p for p, _ in other_matches] + bare_matches, default=-1)
-        last_surname = max(surname_matches, default=-1)
-        last_pos = max(last_full, last_other, last_surname)
-        if last_pos == -1:
-            return ('low_review' if bare_low_confidence else 'none')
-        if last_pos == last_full:
-            return 'designated'
-        if last_pos == last_surname and last_surname > last_other:
-            return 'designated_short'
-        return 'other'
+            candidates.append((m.start(), 'other', m.group(2)))
+        for m in self.SIDE_PAT.finditer(span):
+            candidates.append((m.start(), 'other', m.group(1)))
+        for m in self.OFFICE_PAT.finditer(span):
+            candidates.append((m.start(), 'other', m.group(1)))
+        for m in self.GENERIC_OTHER_SURNAME_PAT.finditer(span):
+            candidates.append((m.start(), 'other', m.group(2)))
+
+        if not candidates:
+            return 'low_review' if bare_low_confidence else 'none'
+
+        candidates.sort(key=lambda c: c[0])
+        last_pos, last_kind, last_josa = candidates[-1]
+
+        # 기본은 '마지막(인용문에 가장 가까운) 후보가 이긴다' (직접 인접 = 직접 화자일 가능성 높음)
+        if last_kind == 'other' and last_josa in ('이', '가'):
+            # 먼저: 인용문 직후에 그 후보를 향한 인용동사(발언한/말한 등)가 바로 붙으면,
+            # 그 후보가 이 인용문의 확정된 화자이므로 예외 적용을 하지 않는다.
+            if self.QUOTATIVE_VERB_PAT.match(lookahead):
+                return 'other'
+            # 그 외의 경우, 주제전환 신호(것에 대해, 와 관련해 등)가 그 후보 뒤에 있으면
+            # 그 후보는 인용문과 무관한 별개 행위의 주어일 뿐이므로, 바깥의 '은/는'(진짜 화자)
+            # 후보가 우선한다.
+            between = span[last_pos:]
+            has_boundary_after = any(p in between for p in self.BOUNDARY_PHRASES)
+            if has_boundary_after:
+                topic_marked_designated = [c for c in candidates if c[2] in ('은', '는') and c[1] == 'designated']
+                if topic_marked_designated:
+                    return 'designated'
+
+        return last_kind
+
+    def _has_designated_topic_marker(self, raw_span):
+        """이 span 안에 지정발언자를 가리키는 은/는-표지 후보가 있는지 (다른 후보에게 졌더라도).
+        정식 직함 목록에 없는 짧은 축약형(예: '이 전 위원은')도 문맥승계 초기상태 판단용으로만
+        약하게 인식한다 (직접적인 화자 배제 판정에는 쓰지 않으므로 위험이 낮다)."""
+        span = self._mask_single_quoted(raw_span)
+        for m in self.FULLNAME_TITLE_PAT.finditer(span):
+            if m.group(1) in ('은', '는'):
+                return True
+        for m in self.SURNAME_TITLE_PAT.finditer(span):
+            if m.group(1) in ('은', '는'):
+                return True
+        weak_pat = re.compile(re.escape(self.surname) + r'\s?전\s?[가-힣]{1,4}\s?(은|는)(?=[\s,.\"“”‘’]|$)')
+        if weak_pat.search(span):
+            return True
+        return False
 
     def _filter_third_party(self, f_text):
         """중문/복문 화자 판별: 타인 발언으로 판정된 인용문을 제외.
@@ -115,10 +172,31 @@ class Stage1Extractor:
 
         search_start = 0
         kinds = []
+        current_state = 'designated'  # 문장 맨 앞은 F열 선별 기준상 지정발언자로 시작한다고 가정
+        initial_state = None  # 문장을 열며 확정된 '바깥(주절) 화자' -- 주제전환 신호가 나오면 여기로 복귀
         for q in quotes:
             qpos = f_text.find(q, search_start)
             span = f_text[search_start:qpos]
-            kinds.append(self._classify_span(span))
+            lookahead = f_text[qpos + len(q): qpos + len(q) + 20]
+            raw_kind = self._classify_span(span, lookahead)
+            if initial_state is None and self._has_designated_topic_marker(span):
+                initial_state = 'designated'
+            if raw_kind in ('designated', 'designated_short'):
+                current_state = 'designated'
+                kinds.append('designated')
+                if initial_state is None:
+                    initial_state = 'designated'
+            elif raw_kind == 'other':
+                current_state = 'other'
+                kinds.append('other')
+            elif raw_kind == 'low_review':
+                kinds.append('low_review')
+                # 상태는 바꾸지 않음(애매하므로 이전 상태 유지)
+            else:  # 'none' -> 새 주어가 없으므로 원칙적으로 직전 인용문의 화자를 이어받는다(문맥승계)
+                if any(p in span for p in self.BOUNDARY_PHRASES) and initial_state is not None:
+                    # 단, 주제전환 신호가 있으면 직전 화자가 아니라 '바깥(주절) 화자'로 복귀한다
+                    current_state = initial_state
+                kinds.append(current_state)
             search_start = qpos + len(q)
         kept = [q for q, k in zip(quotes, kinds) if k != 'other' and q not in self_ref_quotes]
         review = [q for q, k in zip(quotes, kinds) if k == 'low_review' and q not in self_ref_quotes]

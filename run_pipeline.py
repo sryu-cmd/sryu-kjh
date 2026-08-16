@@ -5,10 +5,27 @@
     python run_pipeline.py <입력.csv> <이름> <성> <출력_접두어>
     예: python run_pipeline.py input.csv 이낙연 이 이낙연
 """
-import sys, csv
+import sys, csv, re
 from stage1_core import Stage1Extractor
 from stage2_group_v2 import run_stage2A, run_stage2C
 from stage3_dedup import run_stage3
+
+
+def build_output_prefix(input_filepath, designated):
+    """입력 파일명에서 기간(YYYYMMDD-YYYYMMDD 등)을 추출해 '성명_기간' 접두어를 만든다.
+    이름이 등장하는 위치 '이후'의 날짜만 찾는다 (그 앞의 업로드 타임스탬프와 혼동 방지).
+    기간을 못 찾으면 성명만 사용한다."""
+    import os
+    basename = os.path.basename(input_filepath)
+    name_pos = basename.find(designated)
+    search_area = basename[name_pos:] if name_pos >= 0 else basename
+    dates = re.findall(r'(20\d{6})', search_area)
+    if len(dates) >= 2:
+        period = f'{dates[0]}-{dates[1]}'
+        return f'{designated}_{period}'
+    elif len(dates) == 1:
+        return f'{designated}_{dates[0]}'
+    return designated
 
 
 def run_stage1(rows, header, designated, surname, f_col_name='발췌문장'):
@@ -31,7 +48,9 @@ def run_stage1(rows, header, designated, surname, f_col_name='발췌문장'):
     return out_rows, stats
 
 
-def run_full_pipeline(infile, designated, surname, out_prefix, outdir='/mnt/user-data/outputs'):
+def run_full_pipeline(infile, designated, surname, out_prefix=None, outdir='/mnt/user-data/outputs'):
+    if out_prefix is None:
+        out_prefix = build_output_prefix(infile, designated)
     with open(infile, encoding='utf-8-sig') as f:
         rows = list(csv.reader(f))
     header, data = rows[0], rows[1:]

@@ -19,7 +19,7 @@ import io
 import json
 import csv as csv_module
 
-from run_pipeline import run_stage1
+from run_pipeline import run_stage1, build_output_prefix
 from stage2_group_v2 import run_stage2A, run_stage2C
 from stage3_dedup import run_stage3
 
@@ -188,7 +188,7 @@ if uploaded and (is_fresh_mode is False or (designated and surname)) and st.butt
     st.download_button(
         "결과 CSV 다운로드",
         data=output.getvalue().encode("utf-8-sig"),
-        file_name=f"{designated}_최종결과.csv",
+        file_name=f"{build_output_prefix(uploaded.name, designated)}_1-3단계.csv",
         mime="text/csv",
     )
     st.dataframe(pd.DataFrame(final_rows[1:], columns=final_rows[0]))
