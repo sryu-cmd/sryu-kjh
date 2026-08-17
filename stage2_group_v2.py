@@ -46,28 +46,28 @@ LONG_CHAIN_THRESHOLD = 5
 
 
 def normalize_adj(s):
-    return re.sub(r'\s+', '', s or '')
+    return re.sub(r'[\s.]+', '', s or '')
 
 
 def is_adjacent(prev_f, cur_paragraph, cur_f=''):
-    """현재 행의 발췌문단에 바로 앞 행의 발언문장이 들어있고, 그 직후에 (사이에 다른 문장 없이)
-    현재 행의 발언문장이 곧바로 이어지면 인접으로 판정한다.
-    (2026년 강화: 앞 F 뒤에 타인 발언 등 다른 문장이 끼어 있는 경우를 잡아내기 위해,
-    앞 F가 끝나는 지점 바로 뒤에서 현재 F의 앞부분이 시작되는지까지 확인한다.)"""
+    """인접성 판정 (2026년 재정리, 편집인 제안 로직):
+    1) 발췌문단 안에서 '현재 행의 발언문장(cur_f)' 자체의 위치를 먼저 찾는다 (대개 하단에 있음).
+    2) 그 바로 앞부분이 '앞 행의 발언문장(prev_f)'과 일치하는지 확인한다 (역방향 탐색).
+    현재 문장의 위치를 기준으로 거꾸로 확인하면, 문단에 여러 문장이 누적되어 있어도
+    엉뚱한(더 이른) 위치에서 prev_f가 우연히 매칭되는 오류를 피할 수 있다."""
     pf = normalize_adj(prev_f)
     cp = normalize_adj(cur_paragraph)
     cf = normalize_adj(cur_f)
     if not pf or not cp:
         return False
-    pos = cp.find(pf)
-    if pos < 0 or pos > 5:
-        return False
     if not cf:
-        return True  # cur_f 정보가 없으면 기존 방식대로(앞부분 근접 여부만) 판단
-    after = cp[pos + len(pf):]
-    # 앞 F 종료 직후, 약간의 어미/조사(최대 10자 허용) 이내에 현재 F의 시작이 곧바로 나타나야 인접
-    head = cf[:min(len(cf), 15)]
-    return head in after[:len(after) if len(after) < 30 else 30]
+        pos = cp.find(pf)
+        return 0 <= pos <= 5
+    cf_pos = cp.find(cf)
+    if cf_pos < 0:
+        return False
+    preceding = cp[:cf_pos]
+    return preceding.endswith(pf)
 
 
 def classify_pair(f_text, prev_f, cur_paragraph):
@@ -91,6 +91,8 @@ def classify_pair(f_text, prev_f, cur_paragraph):
         return '분절', '후속반응(지적/논란/비판)'
     if BARE_IE_PAT.match(lead):
         return '분절', "이에(단독)"
+    if re.match(r'^앞서\b', lead):
+        return '분절', '시간역행(앞서)'
 
     conn_found = None
     remainder = lead
