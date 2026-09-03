@@ -10,7 +10,8 @@ from title_master_list import PARTY_NAMES
 _PARTY_ALT = '|'.join(sorted(PARTY_NAMES, key=len, reverse=True))
 
 MERGE_CONNECTORS = ['이어서', '이어', '또한', '또', '그러면서', '그리고', '계속해서',
-                     '이와 함께', '특히', '이에 더해', '이에 덧붙여', '나아가', '아울러', '그러나']
+                     '이와 함께', '특히', '이에 더해', '이에 덧붙여', '나아가', '아울러', '그러나',
+                     '마지막으로']
 MERGE_CONNECTORS_SORTED = sorted(MERGE_CONNECTORS, key=len, reverse=True)
 
 SPLIT_SIGNALS = ['에 대해서는', '에 관해서는', '라는 질문에는', '을 두고는', '에 대해',
@@ -32,6 +33,7 @@ BACKLASH_PAT = re.compile(r'(지적이\s*잇따르자|논란이\s*일자|비판�
 SUBJECT_PAT = re.compile(r'^(그는|그가|그도|[가-힣]{1,4}\s?(?:전\s)?(?:의원|최고위원|대표|장관|위원장|총리|지사|후보)(?:은|는|도|이|가))')
 FILLER_PAT = re.compile(
     r'(\d{1,2}일|이날|당일|자신의|공식|' + _PARTY_ALT + r'|페이스북|트위터|X\(옛\s?트위터\)|SNS|라디오|유튜브|채널|'
+    r'KBS|MBC|SBS|YTN|JTBC|CBS|TV|오마이TV|CBS|OBS|MBN|TBS|'
     r'인터뷰|기자회견|브리핑|통화|간담회|의원회관|국회에서|성명(?:을 통해)?|보도자료|기고문|서면|'
     r'오전|오후|국회|당사|열린|개최된|주재한|주재로|참석해|참석한|이같이\s*(?:언급|말|밝히)(?:하며|며)|'
     r'(?:을|를)\s*(?:발표|진행|소개)(?:하고|하며)|출연해|출연하여|'

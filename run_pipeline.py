@@ -8,7 +8,7 @@
 import sys, csv, re
 from stage1_core import Stage1Extractor
 from stage2_group_v2 import run_stage2A, run_stage2C
-from stage3_dedup import run_stage3
+from stage3_cluster import run_stage3_cluster as run_stage3
 
 
 def build_output_prefix(input_filepath, designated):
@@ -56,6 +56,9 @@ def run_full_pipeline(infile, designated, surname, out_prefix=None, outdir='/mnt
     header, data = rows[0], rows[1:]
     print(f'[{out_prefix}] 입력 행수: {len(data)}')
 
+    from stage0_reorder import reorder_by_article
+    data = reorder_by_article(data, header)
+
     s1_rows, stats = run_stage1(data, header, designated, surname)
     print(f'[{out_prefix}] 1단계:', stats)
     s1_header, s1_data = s1_rows[0], s1_rows[1:]
@@ -72,7 +75,7 @@ def run_full_pipeline(infile, designated, surname, out_prefix=None, outdir='/mnt
     with open(f'{outdir}/{out_prefix}_2단계.csv', 'w', encoding='utf-8-sig', newline='') as f:
         csv.writer(f).writerows(s2c_rows)
 
-    s3_rows, empty_groups = run_stage3(s2c_data, s2c_header)
+    s3_rows, empty_groups = run_stage3(s2c_data, s2c_header, threshold=0.8)
     with open(f'{outdir}/{out_prefix}_3단계.csv', 'w', encoding='utf-8-sig', newline='') as f:
         csv.writer(f).writerows(s3_rows)
     h_i = s2c_header.index('인용문(발췌)')

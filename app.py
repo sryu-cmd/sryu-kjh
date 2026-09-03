@@ -21,7 +21,8 @@ import csv as csv_module
 
 from run_pipeline import run_stage1, build_output_prefix
 from stage2_group_v2 import run_stage2A, run_stage2C
-from stage3_dedup import run_stage3
+from stage3_cluster import run_stage3_cluster as run_stage3
+from stage0_reorder import reorder_by_article
 
 st.set_page_config(page_title="발언 인용문 매직박스", layout="wide")
 
@@ -101,7 +102,7 @@ def _call_stage4(client, batch):
     text = text.strip().removeprefix("```json").removesuffix("```").strip()
     try:
         results = json.loads(text)
-        return {item["group_id"]: item["설명문"] for item in results}
+        return {item["group_id"]: item["보충사항"] for item in results}
     except Exception:
         return {}
 
@@ -113,6 +114,8 @@ if uploaded and (is_fresh_mode is False or (designated and surname)) and st.butt
     header, data = rows[0], rows[1:]
 
     if is_fresh_mode:
+        with st.spinner("0단계(기사 재정렬) 처리 중..."):
+            data = reorder_by_article(data, header)
         with st.spinner(f"1단계 처리 중... ({len(data)}행)"):
             s1_rows, stats = run_stage1(data, header, designated, surname)
         st.write("1단계 완료:", stats)
@@ -129,7 +132,7 @@ if uploaded and (is_fresh_mode is False or (designated and surname)) and st.butt
         st.write(f"2단계 완료: 미처리(편집 판단 필요) {n_review}건")
 
         with st.spinner("3단계(중복제거) 처리 중..."):
-            s3_rows, empty_groups = run_stage3(s2c_data, s2c_header)
+            s3_rows, empty_groups = run_stage3(s2c_data, s2c_header, threshold=0.8)
         h_i = s2c_header.index("인용문(발췌)")
         active = [r for r in s3_rows[1:] if r[h_i].strip()]
         st.write(f"3단계 완료: 최종 {len(active)}개 그룹 (삭제 {len(empty_groups)}개)")
@@ -171,7 +174,7 @@ if uploaded and (is_fresh_mode is False or (designated and surname)) and st.butt
                 if batch:
                     explanations.update(_call_stage4(client, batch))
 
-                out_header = s3_rows[0] + ["설명문"]
+                out_header = s3_rows[0] + ["보충사항"]
                 out_rows = [out_header]
                 for r in s3_rows[1:]:
                     gid = r[idx["그룹ID"]]

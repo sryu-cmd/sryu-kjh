@@ -4,7 +4,7 @@
 """
 import sys, csv, re
 sys.path.insert(0, '.')
-from stage3_dedup_audited import run_stage3_audited
+from stage3_dedup_audited import run_stage3_audited, normalize_keep_order
 
 QUOTE_PAT = re.compile(r'"[^"]*"')
 
@@ -66,10 +66,31 @@ def verify(infile, out_prefix):
     if orphan_issues:
         print(' 문제 그룹ID:', orphan_issues)
 
+    # ④ 규칙 위반 자동 점검 (사람이 안 읽어도 되는 자체 검증)
+    #    3단계 처리가 끝난 뒤, 같은 그룹 안에 여전히 '부분집합 관계'인 인용문 쌍이
+    #    남아있는지 다시 훑는다. 정상이라면 0건이어야 한다(부분집합 규칙은 즉시 적용되므로).
+    subset_violations = []
+    for g in active:
+        alive_quotes = [q for q, a in zip(g['quotes'], g['alive']) if a]
+        for i in range(len(alive_quotes)):
+            for j in range(len(alive_quotes)):
+                if i == j:
+                    continue
+                ni, nj = normalize_keep_order(alive_quotes[i]), normalize_keep_order(alive_quotes[j])
+                if ni and nj and ni != nj and ni in nj:
+                    subset_violations.append((alive_quotes[i][:60], alive_quotes[j][:60], g['gid']))
+    print(f'\n=== ④ 규칙 위반 자동 점검 (부분집합 잔존 여부) ===')
+    if subset_violations:
+        print(f'!! 부분집합인데 살아남은 쌍 발견: {len(subset_violations)}건 (버그 의심) !!')
+        for a, b, gid in subset_violations[:10]:
+            print(f'  그룹{gid}: "{a}" ⊂ "{b}"')
+    else:
+        print('부분집합 위반 없음 (정상)')
+
     with open(f'/mnt/user-data/outputs/{out_prefix}_3단계_검증본.csv', 'w', encoding='utf-8-sig', newline='') as f:
         csv.writer(f).writerows(out_rows)
 
-    return match, len(orphan_issues) == 0
+    return match, len(orphan_issues) == 0, len(subset_violations) == 0
 
 if __name__ == '__main__':
     infile = sys.argv[1]
