@@ -135,7 +135,10 @@ def run_stage3_cluster(rows, header, threshold=0.8, protect_n=3, context_min_sim
     # '이 인용문은 없어져도 된다'고 볼 수 없다 - 오히려 이게 살아남아야 할 대표이기 때문.
     def base_rank_key(idx_):
         f = flat[idx_]
-        return (-len(f['text']), f['g']['row_idx'])
+        # 원래 그룹 크기(orig_count)가 큰 쪽이 우선(개수 우선순위, 3-3과 동일 원칙).
+        # 이게 없으면 20(6개)과 21(4개)처럼 인용문마다 승패가 들쭉날쭉해져
+        # 양쪽 다 '일부는 이기고 일부는 짐' 상태가 되어 AON이 둘 다 보존시켜버린다.
+        return (-f['g']['orig_count'], -len(f['text']), f['g']['row_idx'])
 
     is_loser = [False] * n  # 자기 클러스터 안에서 1등이 아니면(즉 더 나은 버전이 따로 있으면) True
     for root, members in clusters.items():

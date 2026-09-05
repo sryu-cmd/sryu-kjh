@@ -10,13 +10,13 @@ from run_pipeline import run_full_pipeline
 
 BASELINE = {
     '이해찬': {'input_file': '/mnt/user-data/uploads/업로드용_파일_이해찬_20200101_20200331_조중동_.csv',
-             'surname': '이', 'expected_final_groups': 437},  # 2026-08 맥락유사도+짧은인용문 그래프제외 반영 후 확정
+             'surname': '이', 'expected_final_groups': 433},  # 2026-08 AON판정용 base_rank_key 개수우선순위 누락 수정 후 확정
     '이준석1': {'input_file': '/mnt/user-data/uploads/업로드용파일_20250629_074058_이준석_20200902_-_20210610_검토후조중동.csv',
-             'name': '이준석', 'surname': '이', 'expected_final_groups': 532},
+             'name': '이준석', 'surname': '이', 'expected_final_groups': 522},
     '이낙연': {'input_file': '/mnt/user-data/uploads/업로드용파일_20251020_103221_이낙연_20230912_-_20240111_검토후조중동.csv',
-             'surname': '이', 'expected_final_groups': 276},
+             'surname': '이', 'expected_final_groups': 275},  # 2026-08 '질문엔/물음엔' 축약형 분절신호 추가 후 확정
     '이인영': {'input_file': '/mnt/user-data/uploads/업로드용파일_20251021_003535_이인영_20230904_-_20251020_검토후.csv',
-             'surname': '이', 'expected_final_groups': 80},
+             'surname': '이', 'expected_final_groups': 79},
     '이언주': {'input_file': '/mnt/user-data/uploads/업로드용파일_20251020_172437_이언주_20250801_-_20251020_검토후조중동.csv',
              'surname': '이', 'expected_final_groups': 37},
 }
