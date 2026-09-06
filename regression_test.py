@@ -14,7 +14,7 @@ BASELINE = {
     '이준석1': {'input_file': '/mnt/user-data/uploads/업로드용파일_20250629_074058_이준석_20200902_-_20210610_검토후조중동.csv',
              'name': '이준석', 'surname': '이', 'expected_final_groups': 522},
     '이낙연': {'input_file': '/mnt/user-data/uploads/업로드용파일_20251020_103221_이낙연_20230912_-_20240111_검토후조중동.csv',
-             'surname': '이', 'expected_final_groups': 275},  # 2026-08 '질문엔/물음엔' 축약형 분절신호 추가 후 확정
+             'surname': '이', 'expected_final_groups': 274},  # 2026-08 국회/실장/매체/측/의원석/입에서 패턴 추가 후 확정
     '이인영': {'input_file': '/mnt/user-data/uploads/업로드용파일_20251021_003535_이인영_20230904_-_20251020_검토후.csv',
              'surname': '이', 'expected_final_groups': 79},
     '이언주': {'input_file': '/mnt/user-data/uploads/업로드용파일_20251020_172437_이언주_20250801_-_20251020_검토후조중동.csv',

@@ -52,7 +52,7 @@ class Stage1Extractor:
         title_pat = r'(?:' + '|'.join(sorted(set(TITLE_LIST), key=len, reverse=True)) + r')'
         party_alt = '|'.join(PARTY_NAMES)
         # 복합 직함(예: '당 대표 비서실장', '원내대표 비서실장')의 앞부분을 위한 선택적 삽입 허용
-        title_prefix = r'(?:당\s?대표|원내대표|최고위원|위원장|대표|대통령실|대통령)?\s?(?:[가-힣]{1,4}(?=지사|시장|군수|교육감|구청장))?\s?'
+        title_prefix = r'(?:당\s?대표|원내대표|최고위원|위원장|대표|대통령실|대통령|국회)?\s?(?:[가-힣]{1,4}(?=지사|시장|군수|교육감|구청장))?\s?'
         connector = (r'(?:\s?\([^)]{0,30}\))?'
                      r'(?:(?:\s전)?(?:\s(?:' + party_alt + r'))?(?:\s전)?)?'
                      r'\s?' + title_prefix)
@@ -79,8 +79,13 @@ class Stage1Extractor:
             r'(?<![가-힣])(' + '|'.join(other_surnames_excl_self) + r')\s?전\s?(?:' + FORMER_IMPORTANT_TITLE + r')' + josa + end
         ) if other_surnames_excl_self else None
         self.BARE_OTHER_PAT = re.compile(r'(' + '|'.join(sorted(BARE_OTHER_WORDS, key=len, reverse=True)) + r')(은|는|이|가|도)' + end)
-        # '[누구] 측이/은/는/도' (예: "문 전 대통령 측이", "회사 측은") - 대변인격 제3자 표현
-        self.SIDE_PAT = re.compile(r'[가-힣]{1,8}\s?측(은|는|이|가|도)' + end)
+        # '[누구] 측이/은/는/도/에서(도)' (예: "문 전 대통령 측이", "회사 측은", "민주당 측에서도") - 대변인격 제3자 표현
+        self.SIDE_PAT = re.compile(r'[가-힣]{1,8}\s?측(은|는|이|가|도|에서도|에서)' + end)
+        # 위치/출처 명사 + 에서(도) - 발언 출처가 사람이 아니라 장소/집단인 경우
+        self.LOCATION_SOURCE_PAT = re.compile(
+            r'[가-힣]{1,10}\s?(?:의원석|기자석|방청석)에(?:서도|서|선)' + end
+            + r'|[가-힣]{1,10}의\s?입에서' + end
+        )
         # '[누구] 의원실이/은/는/도' - 의원 본인이 아닌 보좌진/사무실 명의 - 별개의 제3자로 취급
         self.OFFICE_PAT = re.compile(r'[가-힣]{1,8}\s?의원실(은|는|이|가|도)' + end)
         # 자기지시 배제용: 인용문 '내용 안'에서 [지정발언자 성명+호칭]을 찾는다 (조사 유무 무관, 문장 어디든)
@@ -136,11 +141,20 @@ class Stage1Extractor:
                 if ASK_VERB.search(rest):
                     continue
             if word in LOW_CONFIDENCE_WORDS:
+                # 2026년 수정: 이 후보를 완전히 무시하지 않고 'low_review' 후보로
+                # candidates에 포함시킨다. 이전에는 앞쪽에 이미 다른(예: designated)
+                # 후보가 있으면 이 정당명 후보가 통째로 씹혀, "국민의힘은 '~'라며
+                # 사임계를 제출했다"처럼 정당명이 바로 인용문 앞(가장 강한 화자
+                # 신호)에 있는데도 무시되고 엉뚱하게 앞쪽 후보(지정발언자)가
+                # 이겨버리는 문제가 있었다.
                 bare_low_confidence.append(m.start())
+                candidates.append((m.start(), 'low_review', m.group(2)))
                 continue
             candidates.append((m.start(), 'other', m.group(2)))
         for m in self.SIDE_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(1)))
+        for m in self.LOCATION_SOURCE_PAT.finditer(span):
+            candidates.append((m.start(), 'other', m.group(0)))
         for m in self.OFFICE_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(1)))
         for m in self.GENERIC_OTHER_SURNAME_PAT.finditer(span):
