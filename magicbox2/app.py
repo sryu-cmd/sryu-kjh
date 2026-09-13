@@ -36,13 +36,20 @@ def build_output_prefix(input_filename, designated):
 def run_stage1(data, header, designated, surname):
     idx = {n: i for i, n in enumerate(header)}
     f_i = idx["발췌문장"]
+    e_i = idx.get("발췌문단")
     ex = Stage1Extractor(designated, surname)
     out_header = header + ["인용문(발췌)", "점검필요", "점검사유"]
     out_rows = [out_header]
     point_check_n, none_n = 0, 0
     for r in data:
         f_text = r[f_i]
-        kept, pc, notes = ex.extract_row(f_text)
+        e_text = r[e_i] if e_i is not None else ""
+        # '앞 문단이 없음'은 E열(발췌문단) 자체가 이 인용문으로 시작하는지로 직접
+        # 확인한다(행 단위로 같은 기사인지 비교하는 것보다 직접적인 증거).
+        is_article_first = bool(e_text.strip()) and e_text.strip().startswith('"') \
+            and f_text.strip().startswith('"') \
+            and e_text.strip()[:20] == f_text.strip()[:20]
+        kept, pc, notes = ex.extract_row(f_text, is_article_first, e_text)
         if pc:
             point_check_n += 1
         if not kept and f_text.strip():
