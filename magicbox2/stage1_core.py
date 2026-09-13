@@ -87,10 +87,14 @@ class Stage1Extractor:
         self.FULLNAME_TITLE_PAT = re.compile(pre_party + re.escape(designated) + connector + r'(?:' + title_pat + r')?' + title_suffix + josa + end)
         self.ANY_NAME_TITLE_PAT = re.compile(r'([가-힣]{2,6})' + connector + r'(?:' + title_pat + r')' + title_suffix + josa + end)
         self.SURNAME_TITLE_PAT = re.compile(surname + connector + r'(?:' + title_pat + r')' + title_suffix + josa + end)
-        # 정당명+직함(이름 없이) 구조 (예: "민주당 의원들은", "국민의힘 의원은") -
-        # ANY_NAME_TITLE_PAT은 "이름" 캡처에 정당명이 잘못 들어가 필터링돼 버려지므로 별도 처리.
+        # 정당명+직함(이름 없이) 구조, 복수(들)에 한정 (예: "민주당 의원들은") -
+        # 단수형("민주당 의원은")은 의도적으로 제외한다 - 이는 지정발언자 본인을
+        # 이름 없이 '소속 정당+직함'만으로 가리키는 경우와 구별이 안 되기 때문이다
+        # (예: "더불어민주당 의원은 '~'라고 말했다"가 실제로는 이원욱 본인의 발언인
+        # 사례가 발견됨, 2026년 수정). 복수(들)가 붙으면 "여러 의원 집단"이라는
+        # 뜻이 명확해지므로 제3자로 확정할 수 있다.
         self.PARTY_TITLE_PAT = re.compile(
-            r'(?:' + party_alt + r')\s?(?:' + title_pat + r')' + title_suffix + josa + end
+            r'(?:' + party_alt + r')\s?(?:' + title_pat + r')(?:들)' + josa + end
         )
         # 지정발언자가 아닌 '다른 사람'의 성(1글자)+직함 (예: "조 장관은", "최 대표는") -
         # 흔한 한국 성씨 목록으로 한정해 오탐 위험을 낮춘다 (임의의 한 글자를 성으로 보지 않는다).
