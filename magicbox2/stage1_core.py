@@ -231,7 +231,15 @@ class Stage1Extractor:
             candidates.append((m.start(), 'other', m.group(1)))
         for m in self.BRANCH_OFFICE_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(1)))
+        REATTRIBUTION_AFTER_RECEIVED = re.compile(r'(?:공개하며|공유하며|전하며|밝히며|알리며|폭로하며)')
         for m in self.RECEIVED_FROM_PAT.finditer(span):
+            # "~에게 받은 문자를 공개하며 [인용문]"처럼, '받은'과 인용문 사이에
+            # 재확정 동사(공개하며 등)가 다시 나오면 이는 받은 사람(designated)
+            # 본인이 그것을 공개하면서 자신의 발언(인용문)을 한 것이므로,
+            # 이 후보를 추가하지 않는다(2026년 수정, 편집인 제안).
+            after = span[m.end():]
+            if REATTRIBUTION_AFTER_RECEIVED.search(after):
+                continue
             candidates.append((m.start(), 'other', m.group(0)))
         for m in self.GENERIC_OTHER_SURNAME_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(2)))
