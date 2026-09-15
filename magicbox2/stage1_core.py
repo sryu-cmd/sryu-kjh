@@ -72,7 +72,7 @@ class Stage1Extractor:
         self.designated = designated
         self.surname = surname
 
-        title_pat = r'(?:제?[0-9]\s?)?(?:' + '|'.join(sorted(set(TITLE_LIST), key=len, reverse=True)) + r')'
+        title_pat = r'(?:제?[0-9]\s?)?(?:공동|창당준비|신임|전임)*(?:' + '|'.join(sorted(set(TITLE_LIST), key=len, reverse=True)) + r')'
         party_alt = '|'.join(sorted(PARTY_NAMES, key=len, reverse=True))
         # 복합 직함(예: '당 대표 비서실장', '원내대표 비서실장')의 앞부분을 위한 선택적 삽입 허용
         title_prefix = r'(?:당\s?대표|원내대표|최고위원|위원장|대표|대통령실|대통령|국회)?\s?(?:[가-힣]{1,4}(?=지사|시장|군수|교육감|구청장))?\s?'
@@ -84,7 +84,15 @@ class Stage1Extractor:
 
         title_suffix = r'(?:\s?직무대행)?(?:들)?(?:\s?\([^)]{0,30}\))?'
         pre_party = r'(?:(?:' + party_alt + r')\s)?'
-        self.FULLNAME_TITLE_PAT = re.compile(pre_party + re.escape(designated) + connector + r'(?:' + title_pat + r')?' + title_suffix + josa + end)
+        # 2026년 추가(편집인 제안): 지정발언자의 [성명] 뒤에 알려진 직함 목록에
+        # 없는 새 호칭(예: "공동대표", "공동창당준비위원장")이 와도, [성명]이 정확히
+        # 일치하면 그 사이의 짧은 한글 단어는 십중팔구 새로운 직함이다. 직함을
+        # 일일이 목록에 등록하지 않아도 인식되도록 대체 경로(fallback)를 둔다.
+        # 다만 '~한/~된'류 절(용언 활용형)과 혼동되지 않도록 짧은 길이로 제한한다.
+        self.FULLNAME_TITLE_PAT = re.compile(
+            pre_party + re.escape(designated) + connector
+            + r'(?:(?:' + title_pat + r')|[가-힣]{1,8})?' + title_suffix + josa + end
+        )
         self.ANY_NAME_TITLE_PAT = re.compile(r'([가-힣]{2,6})' + connector + r'(?:' + title_pat + r')' + title_suffix + josa + end)
         self.SURNAME_TITLE_PAT = re.compile(surname + connector + r'(?:' + title_pat + r')' + title_suffix + josa + end)
         # 정당명+직함(이름 없이) 구조, 복수(들)에 한정 (예: "민주당 의원들은") -
@@ -132,6 +140,10 @@ class Stage1Extractor:
         )
         # '[누구] 의원실이/은/는/도' - 의원 본인이 아닌 보좌진/사무실 명의 - 별개의 제3자로 취급
         self.OFFICE_PAT = re.compile(r'[가-힣]{1,8}\s?의원실(은|는|이|가|도)' + end)
+        # '[누구]에게(서) 받은' - 그 뒤에 오는 인용문(들)은 받은 사람이 아니라
+        # 보낸 사람의 것이다 (예: "지지층에게 받은 '수박 아웃', '역겹다' 등의 문자
+        # 메시지를 공개하며..."). '~에게'만으로는 후보로 안 잡히므로 별도 처리.
+        self.RECEIVED_FROM_PAT = re.compile(r'[가-힣]{1,10}에게(?:서)?\s?받은' + end)
         # 지역명+지검/지법/지청 (예: "전주지검", "수원지법") - 기관 자체가 화자인 경우.
         # 지역명이 다양해 일일이 목록화하지 않고 접미어로 일반화한다.
         self.BRANCH_OFFICE_PAT = re.compile(r'[가-힣]{2,4}(?:지검|지법|지청)(은|는|이|가|도)' + end)
@@ -161,6 +173,8 @@ class Stage1Extractor:
                         '에게',
                         '과 관련', '을 두고', '를 두고', '것을 두고',
                         '을 거론하며', '를 거론하며', '을 거론하면서', '를 거론하면서',
+                        '을 상기하며', '를 상기하며', '을 상기시키며', '를 상기시키며',
+                        '을 밝히면서', '를 밝히면서', '입장을 밝히면서',
                         '을 겨냥해', '를 겨냥해', '을 지목하며', '를 지목하며',
                         '을 언급하며', '를 언급하며',
                         '을 재소환하며', '를 재소환하며', '될 경우', '할 경우',
@@ -217,6 +231,8 @@ class Stage1Extractor:
             candidates.append((m.start(), 'other', m.group(1)))
         for m in self.BRANCH_OFFICE_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(1)))
+        for m in self.RECEIVED_FROM_PAT.finditer(span):
+            candidates.append((m.start(), 'other', m.group(0)))
         for m in self.GENERIC_OTHER_SURNAME_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(2)))
         for m in self.TITLE_ONLY_ACTING_PAT.finditer(span):
@@ -254,12 +270,20 @@ class Stage1Extractor:
             # 후보가 우선한다.
             between = span[last_pos:]
             has_boundary_after = any(p in between for p in self.BOUNDARY_PHRASES)
+            # 예외(편집인 제안, 2026년): "~한 뒤"가 boundary로 걸려도, 그 뒤에
+            # "자신"(재귀대명사)이 바로 이어지면 이는 같은 주어의 연속된 행동을
+            # 잇는 시간부사일 뿐이다(예: "김용민 의원이 악수한 뒤 자신의 페이스북에
+            # '~'는 글을 올린 것과 관련해서는"). 이 경우 boundary를 취소한다.
+            if has_boundary_after and '한 뒤' in between:
+                after_dwi = between[between.find('한 뒤') + 3:between.find('한 뒤') + 8]
+                if '자신' in after_dwi or '본인' in after_dwi:
+                    has_boundary_after = any(p in between for p in self.BOUNDARY_PHRASES if p != '한 뒤')
             # "~하자"류 접속어미(문법 패턴이라 고정 어구 목록에 넣을 수 없음): 삽입절 주어의
             # 독립된 행동/반응을 나타내는 매우 흔한 신호다 (예: "최 처장이 머뭇거리자").
             if not has_boundary_after and re.search(r'[가-힣]{1,3}자(?:,|\s)', between[:20]):
                 has_boundary_after = True
             if has_boundary_after:
-                topic_marked_designated = [c for c in candidates if c[2] in ('은', '는') and c[1] == 'designated']
+                topic_marked_designated = [c for c in candidates if c[2] in ('은', '는', '도') and c[1] == 'designated']
                 if topic_marked_designated or e_confirmed_designated:
                     return 'designated'
 
@@ -362,6 +386,14 @@ class Stage1Extractor:
         BARE_ATTRIBUTION_LOOKAHEAD_PAT = re.compile(
             r'^(?:이|가|라)?는\s?(?:답(?:변)?|발언|질문|물음)'
         )
+        # 위 규칙의 예외(편집인 제안, 2026년): "quote"는 질문을 [던졌다/했다/제기했다]"
+        # 처럼, "질문"이 여격(~에, 답변자로 전환)이 아니라 목적격(~을/를)이고 뒤에
+        # 능동 동사가 오면, 이건 '누군가에게 그 질문이 주어졌다'가 아니라 문장의
+        # 은/는-주어 본인이 '직접 그 질문을 던진 행위'이다. 이 경우 인용문은 그
+        # 주어(designated 포함) 본인의 것이므로 배제하면 안 된다.
+        BARE_ATTRIBUTION_EXCEPTION_PAT = re.compile(
+            r'^(?:이|가|라)?는\s?질문(?:을|를)\s?[가-힣\s]{0,10}(?:던졌|했다|제기했)'
+        )
         # 2026년 추가(편집인 제안 - 보어 유형): '"quote"라고 답한/말한/밝힌 OOO는'처럼,
         # 화자 이름이 인용문 '뒤'에 관형절로 붙어서 나오는 경우. 기존 구조는 인용문
         # '앞'만 보므로 이 경우를 놓친다. rest_of_text에서 이 패턴을 찾아 OOO가
@@ -432,7 +464,7 @@ class Stage1Extractor:
                 is_first_quote = False
                 search_start = qpos + len(q)
                 continue
-            if BARE_ATTRIBUTION_LOOKAHEAD_PAT.match(lookahead):
+            if BARE_ATTRIBUTION_LOOKAHEAD_PAT.match(lookahead) and not BARE_ATTRIBUTION_EXCEPTION_PAT.match(lookahead):
                 kinds.append('other')
                 is_first_quote = False
                 search_start = qpos + len(q)
