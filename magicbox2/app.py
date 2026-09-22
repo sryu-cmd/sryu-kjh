@@ -1,10 +1,12 @@
 """
-매직박스2: 1~2단계 전용 (3단계 중복제거 없음)
+매직박스 1~3단계
 
-목적: 3단계(클러스터 기반 중복제거)가 예측하기 어려운 문제를 계속 일으키고 있어,
-1~2단계만 먼저 충분히 검증한 뒤 3단계를 나중에 연결하기 위한 별도 앱.
+1단계(발췌) + 2단계(그루핑) + 3단계(중복제거) 통합.
+2026년 정리: 3단계는 순수 1:1 비교(클러스터 없음) 기반의 최종 설계를
+반영했다 - 동일개수그룹 통비교 -> 부분집합 정리 -> 재통비교 -> 최종
+1:1비교 순서로 진행되며, 위치 규칙은 "나중 것 존속"이다.
 
-배포 방법은 기존 매직박스와 동일 (별도의 GitHub 저장소/Streamlit Cloud 앱으로 배포 권장).
+배포 방법: 기존 매직박스와 동일 (Streamlit Cloud 등).
 로컬 테스트: streamlit run app.py
 """
 import streamlit as st
@@ -16,8 +18,9 @@ import csv as csv_module
 from stage0_reorder import reorder_by_article
 from stage1_core import Stage1Extractor
 from stage2_group_v2 import run_stage2A, run_stage2C
+from stage3_final import run_stage3_final
 
-st.set_page_config(page_title="발언 인용문 매직박스2 (1~2단계 전용)", layout="wide")
+st.set_page_config(page_title="발언 인용문 매직박스 (1~3단계)", layout="wide")
 
 
 def build_output_prefix(input_filename, designated):
@@ -62,7 +65,7 @@ def run_stage1(data, header, designated, surname):
 def check_login():
     if st.session_state.get("logged_in"):
         return True
-    st.title("발언 인용문 매직박스2 (1~2단계 전용)")
+    st.title("발언 인용문 매직박스 (1~3단계)")
     st.caption("아이디와 비밀번호를 입력하세요")
     with st.form("login_form"):
         uid = st.text_input("아이디")
@@ -92,10 +95,12 @@ if st.sidebar.button("로그아웃"):
     st.rerun()
 
 # ---------- 메인 화면 ----------
-st.title("발언 인용문 추출·정리 — 1~2단계 전용")
-st.info("이 앱은 **3단계(중복제거)를 실행하지 않습니다.** 1단계(발췌)와 2단계(그루핑)만 "
-        "충분히 검증하기 위한 별도 버전입니다. 결과물에는 같은 발언의 중복이 그대로 남아있을 "
-        "수 있습니다 — 이는 정상입니다.")
+st.title("발언 인용문 추출·정리 — 1~3단계")
+st.info("1단계(발췌) → 2단계(그루핑) → 3단계(중복제거) 순서로 자동 진행합니다. "
+        "3단계는 순수 1:1 비교 방식이며, 완전히 동일한 두 그룹은 나중 것이 존속합니다. "
+        "'A+B=C' 패턴(인접한 두 인용문의 합이 다른 그룹의 긴 인용문 하나와 같은 경우)은 "
+        "사람이 먼저 확인해야 하는 별도 도구(find_ab_c_patterns.py)로 처리하며, 이 앱에는 "
+        "포함되어 있지 않습니다.")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -129,18 +134,26 @@ if uploaded and designated and surname and st.button("실행", type="primary"):
     label_i = s2a_header.index("2A라벨")
     n_review = sum(1 for r in s2a_data if r[label_i] == "미처리")
     h_i = s2c_header.index("인용문(발췌)")
-    active = [r for r in s2c_data if r[h_i].strip()]
-    st.write(f"2단계 완료: 최종 {len(active)}개 그룹 | 미처리(편집 판단 필요) {n_review}건")
+    active_before_dedup = [r for r in s2c_data if r[h_i].strip()]
+    quotes_before_dedup = sum(r[h_i].count('"') // 2 for r in active_before_dedup)
+    st.write(f"2단계 완료: 그룹 {len(active_before_dedup)}개 | 인용문 {quotes_before_dedup}개 | 미처리(편집 판단 필요) {n_review}건")
 
-    final_rows = s2c_rows
+    with st.spinner("3단계(중복제거) 처리 중..."):
+        s3_rows, removed = run_stage3_final(s2c_data, s2c_header, threshold=0.8, min_subset_portion=0.30)
+    s3_header, s3_data = s3_rows[0], s3_rows[1:]
+    active_after_dedup = [r for r in s3_data if r[h_i].strip()]
+    quotes_after_dedup = sum(r[h_i].count('"') // 2 for r in active_after_dedup)
+    st.write(f"3단계 완료: 그룹 {len(active_after_dedup)}개 | 인용문 {quotes_after_dedup}개 (제거 {removed}개)")
+
+    final_rows = s3_rows
 
     output = io.StringIO()
     writer = csv_module.writer(output)
     writer.writerows(final_rows)
     st.download_button(
-        "결과 CSV 다운로드 (1~2단계, 3단계 없음)",
+        "결과 CSV 다운로드 (1~3단계)",
         data=output.getvalue().encode("utf-8-sig"),
-        file_name=f"{build_output_prefix(uploaded.name, designated)}_1-2단계.csv",
+        file_name=f"{build_output_prefix(uploaded.name, designated)}_1-3단계.csv",
         mime="text/csv",
     )
     st.dataframe(pd.DataFrame(final_rows[1:], columns=final_rows[0]))
