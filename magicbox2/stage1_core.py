@@ -12,7 +12,8 @@ from title_master_list import TITLE_LIST, PARTY_NAMES, BARE_OTHER_WORDS, COMMON_
 
 QUOTE_PAT = re.compile(r'"[^"]*"|“[^”]*”')
 SINGLE_QUOTE_SPAN = re.compile(r'[\u2018\u2019\']')
-COMPOUND_PREFIX_BLACKLIST = {'국무', '국회', '지방', '자치', '정부', '청와대', '국방', '법무', '원내', '정무'}
+COMPOUND_PREFIX_BLACKLIST = {'국무', '국회', '지방', '자치', '정부', '청와대', '국방', '법무', '원내', '정무',
+                             '공동', '창당준비', '신임', '전임'}
 ASK_VERB = re.compile(r'(묻자|물었다|질문했다|물어봤다)')
 
 # 관형사절 일반화 규칙 (2026년, 편집인 제안): 한글 음절의 종성이 ㄴ/ㄹ이면
@@ -72,7 +73,7 @@ class Stage1Extractor:
         self.designated = designated
         self.surname = surname
 
-        title_pat = r'(?:제?[0-9]\s?)?(?:공동|창당준비|신임|전임)*(?:' + '|'.join(sorted(set(TITLE_LIST), key=len, reverse=True)) + r')'
+        title_pat = r'(?:제?[0-9]\s?)?(?:공동|창당준비)*(?:(?:신임|전임)\s?)?(?:' + '|'.join(sorted(set(TITLE_LIST), key=len, reverse=True)) + r')'
         party_alt = '|'.join(sorted(PARTY_NAMES, key=len, reverse=True))
         # 복합 직함(예: '당 대표 비서실장', '원내대표 비서실장')의 앞부분을 위한 선택적 삽입 허용
         title_prefix = r'(?:당\s?대표|원내대표|최고위원|위원장|대표|대통령실|대통령|국회)?\s?(?:[가-힣]{1,4}(?=지사|시장|군수|교육감|구청장))?\s?'
@@ -110,7 +111,12 @@ class Stage1Extractor:
         self.GENERIC_OTHER_SURNAME_PAT = re.compile(
             r'(?<![가-힣])(' + '|'.join(common_surnames) + r')\s?(?:' + title_pat + r')' + title_suffix + josa + end
         )
-        # '직함 직무대행'만으로도(성씨 없이) 화자가 되는 경우 (예: "이 직무대행이")
+        # '전'(성씨)+직함 - 다만 '전'은 'ex-' 접두어로도 쓰이므로("김 전 원내대표"=
+        # 김씨의 예전 원내대표), 앞에 다른 이름/성이 없을 때만("전 원내대표"처럼
+        # 단독으로 나올 때만) 전씨 성으로 인정한다 (편집인 제안, 2026년).
+        self.SURNAME_JEON_PAT = re.compile(
+            r'(?<![가-힣]\s)(?<![가-힣])전\s?(?:' + title_pat + r')' + title_suffix + josa + end
+        )
         # 위의 '이 청장 직무대행'과 별개로, 성씨 없이 '이 직무대행'처럼 축약된 경우를 대비한다.
         self.TITLE_ONLY_ACTING_PAT = re.compile(
             r'(?<![가-힣])(' + '|'.join(common_surnames) + r')\s?직무대행' + josa + end
@@ -243,6 +249,8 @@ class Stage1Extractor:
             candidates.append((m.start(), 'other', m.group(0)))
         for m in self.GENERIC_OTHER_SURNAME_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(2)))
+        for m in self.SURNAME_JEON_PAT.finditer(span):
+            candidates.append((m.start(), 'other', m.group(0)))
         for m in self.TITLE_ONLY_ACTING_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(2)))
         if getattr(self, '_same_surname_diff_title_pat', None) is not None:
