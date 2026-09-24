@@ -13,7 +13,13 @@ from title_master_list import TITLE_LIST, PARTY_NAMES, BARE_OTHER_WORDS, COMMON_
 QUOTE_PAT = re.compile(r'"[^"]*"|“[^”]*”')
 SINGLE_QUOTE_SPAN = re.compile(r'[\u2018\u2019\']')
 COMPOUND_PREFIX_BLACKLIST = {'국무', '국회', '지방', '자치', '정부', '청와대', '국방', '법무', '원내', '정무',
-                             '공동', '창당준비', '신임', '전임'}
+                             '공동', '창당준비', '신임', '전임',
+                             '행정안전부', '행안부', '기획재정부', '기재부', '교육부', '외교부',
+                             '통일부', '국방부', '법무부', '문화체육관광부', '문체부',
+                             '농림축산식품부', '농식품부', '산업통상자원부', '산업부',
+                             '보건복지부', '복지부', '환경부', '고용노동부', '고용부',
+                             '여성가족부', '여가부', '국토교통부', '국토부', '해양수산부', '해수부',
+                             '중소벤처기업부', '중기부', '과학기술정보통신부', '과기정통부'}
 ASK_VERB = re.compile(r'(묻자|물었다|질문했다|물어봤다)')
 
 # 관형사절 일반화 규칙 (2026년, 편집인 제안): 한글 음절의 종성이 ㄴ/ㄹ이면
@@ -69,9 +75,19 @@ REVIEW_RATIO_THRESHOLD = 0.70
 
 
 class Stage1Extractor:
-    def __init__(self, designated: str, surname: str):
+    def __init__(self, designated: str, surname: str, current_posts=None):
         self.designated = designated
         self.surname = surname
+        # 2026년 추가(편집인 제안): 지정발언자가 현재 맡고 있는 관공서 직책(예:
+        # "행정안전부 장관", "행안부 장관")은 이름 없이 단독으로 등장해도 여전히
+        # 지정발언자를 가리킨다. 이런 직책명 리스트를 입력받아, 정확히 그 문구가
+        # (다른 이름 없이) 나오면 designated로 인식한다.
+        self.current_posts = [p.strip() for p in (current_posts or []) if p.strip()]
+        if self.current_posts:
+            posts_alt = '|'.join(sorted(self.current_posts, key=len, reverse=True))
+            self.CURRENT_POST_PAT = re.compile(r'(?:' + posts_alt + r')(은|는|이|가|도)(?=[\s,.\"“”‘’]|$)')
+        else:
+            self.CURRENT_POST_PAT = None
 
         title_pat = r'(?:제?[0-9]\s?)?(?:공동|창당준비)*(?:(?:신임|전임)\s?)?(?:' + '|'.join(sorted(set(TITLE_LIST), key=len, reverse=True)) + r')'
         party_alt = '|'.join(sorted(PARTY_NAMES, key=len, reverse=True))
@@ -92,7 +108,7 @@ class Stage1Extractor:
         # 다만 '~한/~된'류 절(용언 활용형)과 혼동되지 않도록 짧은 길이로 제한한다.
         self.FULLNAME_TITLE_PAT = re.compile(
             pre_party + re.escape(designated) + connector
-            + r'(?:(?:' + title_pat + r')|[가-힣]{1,8})?' + title_suffix + josa + end
+            + r'(?:(?:' + title_pat + r')|[가-힣]{1,8}\s?[가-힣]{0,6})?' + title_suffix + josa + end
         )
         self.ANY_NAME_TITLE_PAT = re.compile(r'([가-힣]{2,6})' + connector + r'(?:' + title_pat + r')' + title_suffix + josa + end)
         self.SURNAME_TITLE_PAT = re.compile(surname + connector + r'(?:' + title_pat + r')' + title_suffix + josa + end)
@@ -251,6 +267,9 @@ class Stage1Extractor:
             candidates.append((m.start(), 'other', m.group(2)))
         for m in self.SURNAME_JEON_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(0)))
+        if self.CURRENT_POST_PAT is not None:
+            for m in self.CURRENT_POST_PAT.finditer(span):
+                candidates.append((m.start(), 'designated', m.group(1)))
         for m in self.TITLE_ONLY_ACTING_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(2)))
         if getattr(self, '_same_surname_diff_title_pat', None) is not None:
