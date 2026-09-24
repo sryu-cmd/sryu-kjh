@@ -36,11 +36,11 @@ def build_output_prefix(input_filename, designated):
     return designated
 
 
-def run_stage1(data, header, designated, surname):
+def run_stage1(data, header, designated, surname, current_posts=None):
     idx = {n: i for i, n in enumerate(header)}
     f_i = idx["발췌문장"]
     e_i = idx.get("발췌문단")
-    ex = Stage1Extractor(designated, surname)
+    ex = Stage1Extractor(designated, surname, current_posts=current_posts)
     out_header = header + ["인용문(발췌)", "점검필요", "점검사유"]
     out_rows = [out_header]
     point_check_n, none_n = 0, 0
@@ -107,6 +107,10 @@ with col1:
     designated = st.text_input("지정발언자 이름 (예: 이낙연)")
 with col2:
     surname = st.text_input("성 (예: 이)", max_chars=1)
+current_posts_input = st.text_input(
+    "현재 직책명 (선택, 쉼표로 구분) — 예: 행정안전부 장관, 행안부 장관",
+    help="지정발언자가 현재 맡고 있어서 이름 없이 직책명만으로도 본인을 가리키는 경우가 있으면 입력하세요."
+)
 uploaded = st.file_uploader(
     "입력 CSV 파일 (이름, URL, 신문사, 제목, 발췌문단, 발췌문장, 일자 열 포함)", type="csv"
 )
@@ -121,7 +125,8 @@ if uploaded and designated and surname and st.button("실행", type="primary"):
         data = reorder_by_article(data, header)
 
     with st.spinner(f"1단계 처리 중... ({len(data)}행)"):
-        s1_rows, stats = run_stage1(data, header, designated, surname)
+        current_posts = [p.strip() for p in current_posts_input.split(",")] if current_posts_input else []
+        s1_rows, stats = run_stage1(data, header, designated, surname, current_posts=current_posts)
     st.write("1단계 완료:", stats)
 
     s1_header, s1_data = s1_rows[0], s1_rows[1:]
