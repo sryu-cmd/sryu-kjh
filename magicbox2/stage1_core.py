@@ -34,7 +34,7 @@ def _is_adnominal_ending(ch):
 
 ADNOMINAL_NOUN_PAT = re.compile(
     r'([가-힣])\s?([가-힣]{0,4})(것|데|점|경우|듯|바|적|셈|터|즈음|채|노릇|나름|뿐|만큼|대로|'
-    r'사실|의혹|주장|발언|질문|물음|이유)'
+    r'사실|의혹|주장|발언|질문|질의|물음|이유)'
     r'(?:에|을|를|과|와|은|는|도|이|가|엔|든지|만)?'
 )
 
@@ -193,7 +193,7 @@ class Stage1Extractor:
 
     BOUNDARY_PHRASES = ('에 대해', '데 대해', '와 관련해', '과 관련해', '것과 관련', '와 관련',
                         '에게',
-                        '과 관련', '을 두고', '를 두고', '것을 두고',
+                        '과 관련', '을 두고', '를 두고', '것을 두고', '두곤',
                         '을 거론하며', '를 거론하며', '을 거론하면서', '를 거론하면서',
                         '을 상기하며', '를 상기하며', '을 상기시키며', '를 상기시키며',
                         '을 밝히면서', '를 밝히면서', '입장을 밝히면서',
@@ -402,15 +402,16 @@ class Stage1Extractor:
             r'^(?:' + '|'.join(sorted(SAME_SPEAKER_CONNECTORS, key=len, reverse=True)) + r')'
         )
         e_confirmed_designated = False
-        if e_text and f_text in e_text:
-            e_before_f = e_text[:e_text.find(f_text)]
+        f_text_stripped = f_text.rstrip('.')
+        if e_text and f_text_stripped and f_text_stripped in e_text:
+            e_before_f = e_text[:e_text.find(f_text_stripped)]
             if (self.FULLNAME_TITLE_PAT.search(e_before_f) or self.SURNAME_TITLE_PAT.search(e_before_f)) \
                     and '"' in e_before_f:
                 initial_state = 'designated'
                 current_state = 'designated'
                 e_confirmed_designated = True
 
-        QUESTION_LOOKAHEAD_PAT = re.compile(r'^(?:이|가|라)?는\s?(?:질문|물음)에|^(?:다|냐|나|가)는\s?(?:질문|물음)에')
+        QUESTION_LOOKAHEAD_PAT = re.compile(r'^(?:이|가|라)?는\s?(?:질문|질의|물음)(?:에|엔)|^(?:다|냐|나|가)는\s?(?:질문|질의|물음)(?:에|엔)')
         # 지정발언자가 질문자이고, 인용문이 그 질문에 대한 제3자의 답변인 경우
         # (예: "~고 물었더니 '~'라는 답이 돌아왔다"). 위 질문 패턴과는 반대 방향이다.
         ANSWER_LOOKAHEAD_PAT = re.compile(r'^(?:이|가|라)?는\s?답(?:변)?이\s?돌아왔다')
@@ -419,7 +420,7 @@ class Stage1Extractor:
         # 누군가(질문자/발언자)의 것이다. "생략됐다고 없는 것이 아니라 생략된 것"
         # 이므로, 이 뒤에 나오는 은/는/이/가로 표시된 그 누구의 것도 될 수 없다.
         BARE_ATTRIBUTION_LOOKAHEAD_PAT = re.compile(
-            r'^(?:이|가|라)?는\s?(?:답(?:변)?|발언|질문|물음)'
+            r'^(?:이|가|라)?는\s?(?:답(?:변)?|발언|질문|질의|물음|지적)'
         )
         # 위 규칙의 예외(편집인 제안, 2026년): "quote"는 질문을 [던졌다/했다/제기했다]"
         # 처럼, "질문"이 여격(~에, 답변자로 전환)이 아니라 목적격(~을/를)이고 뒤에
@@ -531,7 +532,9 @@ class Stage1Extractor:
                 kinds.append('low_review')
                 # 상태는 바꾸지 않음(애매하므로 이전 상태 유지)
             else:  # 'none' -> 새 주어가 없으므로 원칙적으로 직전 인용문의 화자를 이어받는다(문맥승계)
-                if any(p in span for p in self.BOUNDARY_PHRASES) and initial_state is not None:
+                has_boundary_signal = any(p in span for p in self.BOUNDARY_PHRASES) or \
+                    re.search(r'[가-힣]{1,3}자(?:,|\s)', span[:20])
+                if has_boundary_signal and initial_state is not None:
                     # 단, 주제전환 신호가 있으면 직전 화자가 아니라 '바깥(주절) 화자'로 복귀한다
                     current_state = initial_state
                 kinds.append(current_state)
@@ -618,6 +621,22 @@ class Stage1Extractor:
             reasons.append(notes)
         if orig_quotes and not kept:
             reasons.append('!!이 행의 인용문이 전부 사라짐!!')
+        # 2026년 추가(편집인 제안): "[제3자A]는 '~', [designated 또는 제3자B]는
+        # '~'라고 했다"처럼, 서로 다른 이름(직함 포함)의 인물이 2명 이상 나오고
+        # 각각 인용문이 붙어있는 구조는 화자 귀속이 자동판별로 불안정할 수 있으므로,
+        # 인용문 개수 자체는 안 줄었더라도 점검필요로 표시한다.
+        distinct_names = set()
+        for pat, group_idx in ((self.ANY_NAME_TITLE_PAT, 1), (self.GENERIC_OTHER_SURNAME_PAT, 1)):
+            for m in pat.finditer(f_text):
+                try:
+                    name = m.group(group_idx)
+                except (IndexError, re.error):
+                    continue
+                if name and name not in PARTY_NAMES and name not in COMPOUND_PREFIX_BLACKLIST \
+                        and name != self.designated and name not in self.designated:
+                    distinct_names.add(name)
+        if len(distinct_names) >= 2 and kept:
+            reasons.append('!!복수 화자 구조(서로 다른 이름 2인 이상) - 귀속 확인 필요!!')
 
         point_check = '점검필요' if reasons else ''
         return kept, point_check, '; '.join(reasons)
