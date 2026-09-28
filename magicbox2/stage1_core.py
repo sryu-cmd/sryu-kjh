@@ -8,7 +8,7 @@
     kept_quotes, review_flag, review_note = ex.extract_row(f_text)
 """
 import re
-from title_master_list import TITLE_LIST, PARTY_NAMES, BARE_OTHER_WORDS, COMMON_SURNAMES
+from title_master_list import TITLE_LIST, PARTY_NAMES, BARE_OTHER_WORDS, COMMON_SURNAMES, RECEIVED_CONTENT_NOUNS
 
 QUOTE_PAT = re.compile(r'"[^"]*"|“[^”]*”')
 SINGLE_QUOTE_SPAN = re.compile(r'[\u2018\u2019\']')
@@ -215,6 +215,10 @@ class Stage1Extractor:
                         '을 재소환하며', '를 재소환하며', '될 경우', '할 경우',
                         '하도록', '할 수 있게', '하기 전에', '한 뒤',
                         '는 지적에', '다는 지적에', '라는 지적에',
+                        '는 질책에', '는 질책엔', '는 경고에', '는 경고엔', '는 비판에', '는 비판엔',
+                        '는 비난에', '는 비난엔', '는 요구에', '는 요구엔', '는 주장에', '는 주장엔',
+                        '는 언급에', '는 논평에', '는 설명에', '는 공격에', '는 공격엔',
+                        '놓고는', '놓곤',
                         '에 관해', '데 관해')
 
     QUOTATIVE_VERB_PAT = re.compile(
@@ -443,6 +447,33 @@ class Stage1Extractor:
         BARE_ATTRIBUTION_EXCEPTION_PAT = re.compile(
             r'^(?:이|가|라)?는\s?질문(?:을|를)\s?[가-힣\s]{0,10}(?:던졌|했다|제기했)'
         )
+        # 2026년 추가(편집인 제안, 복문 사례 분석): '"quote"는 [국민의힘 주진우 의원]의
+        # 질의에'처럼 "는"과 명사 사이에 [소유자]+의 구문이 끼는 경우. 기존 패턴은
+        # "는" 바로 뒤에 명사가 와야 매치되어 이 구조(질의/지적/질책 등)를 전부 놓쳤다.
+        # 소유자가 지정발언자 본인이면(예: "quote"는 윤 장관의 답변에) 제외하지 않는다.
+        POSSESSIVE_ATTRIBUTION_LOOKAHEAD_PAT = re.compile(
+            r'^(?:이|가|라)?는\s?((?:[가-힣]+\s){0,4}[가-힣]+)\s?의\s?'
+            r'(?:답(?:변)?|발언|질문|질의|물음|지적|질책|경고|비판|비난|주장|요구|언급|논평|설명)'
+        )
+        # 소유격 조사 "의"가 생략된 형태(예: "이해식 민주당 의원 질의에", "국민의힘 의원들 지적에").
+        # "의"가 없으면 소유자 구문이 무엇이든 매치될 위험이 커지므로, 소유자 구문이 반드시
+        # 직함(선택적으로 복수 '들')으로 끝나는 경우에만 인정한다.
+        POSSESSIVE_NO_UI_LOOKAHEAD_PAT = re.compile(
+            r'^(?:이|가|라)?는\s?((?:[가-힣]+\s){0,4}[가-힣]+)\s'
+            r'(?:답(?:변)?|발언|질문|질의|물음|지적|질책|경고|비판|비난|주장|요구|언급|논평|설명)'
+            r'(?:에|엔|을|를|이|은|도)'
+        )
+        # 2026년 추가(편집인 제안, 수언술어): '"quote"라는 제보를 받았다'처럼 따옴표 안이 지정발언자가
+        # 받은(들은) 내용인 구조. [내용명사]와 [수신술어]가 함께 있어야만 적용한다.
+        # 명사와 술어는 서로 짝을 고정하지 않고 상호 호환으로 본다(편집인 확인).
+        # 수신술어는 활용형을 일일이 나열하지 않고 어간(받-, 듣-, 접-, 전달받- 등)으로 묶는다.
+        _recv_noun_alt = '|'.join(sorted(RECEIVED_CONTENT_NOUNS, key=len, reverse=True))
+        RECEIVE_ATTRIBUTION_LOOKAHEAD_PAT = re.compile(
+            r'^(?:이|가|라)?는\s?(?:(?:취지|내용)의\s)?(?:' + _recv_noun_alt + r')'
+            r'(?:을|를|이|가|도|까지|은|는)?\s?'
+            r'(?:받(?:았|으|고|은|자|아|는|기|게)|듣(?:고|는|자|기)|들(?:었|으|은)|들어(?:왔|와|오)'
+            r'|접(?:했|하|한|수)|샀|사며|당(?:했|하|한|해)|전달받|전해\s?(?:들|듣|받))'
+        )
         # 2026년 추가(편집인 제안 - 보어 유형): '"quote"라고 답한/말한/밝힌 OOO는'처럼,
         # 화자 이름이 인용문 '뒤'에 관형절로 붙어서 나오는 경우. 기존 구조는 인용문
         # '앞'만 보므로 이 경우를 놓친다. rest_of_text에서 이 패턴을 찾아 OOO가
@@ -514,6 +545,36 @@ class Stage1Extractor:
                 search_start = qpos + len(q)
                 continue
             if BARE_ATTRIBUTION_LOOKAHEAD_PAT.match(lookahead) and not BARE_ATTRIBUTION_EXCEPTION_PAT.match(lookahead):
+                kinds.append('other')
+                is_first_quote = False
+                search_start = qpos + len(q)
+                continue
+            poss_m = POSSESSIVE_ATTRIBUTION_LOOKAHEAD_PAT.match(rest_of_text[:80])
+            poss_no_ui = None
+            if not poss_m:
+                cand = POSSESSIVE_NO_UI_LOOKAHEAD_PAT.match(rest_of_text[:80])
+                if cand:
+                    last_word = cand.group(1).split()[-1]
+                    last_word_base = last_word[:-1] if last_word.endswith('들') else last_word
+                    if last_word_base in TITLE_LIST:
+                        poss_no_ui = cand
+            if poss_m or poss_no_ui:
+                possessor = (poss_m or poss_no_ui).group(1)
+                # 소유자가 지정발언자 본인이면 이 규칙을 적용하지 않는다(본인의 답변/발언).
+                probe = possessor + '은'
+                # "~라는 취지의 주장/발언"처럼 '취지·내용·의미' 등은 소유자(사람)가 아니라
+                # 인용문의 성격을 설명하는 말이므로, 이 경우에는 이 규칙을 적용하지 않는다.
+                NON_PERSON_POSSESSORS = ('취지', '내용', '의미', '뜻', '요지', '골자', '논지', '맥락', '차원')
+                possessor_is_content_word = possessor.split()[-1] in NON_PERSON_POSSESSORS
+                possessor_is_designated = bool(
+                    self.FULLNAME_TITLE_PAT.search(probe) or self.SURNAME_TITLE_PAT.search(probe)
+                    or self.designated in possessor)
+                if not possessor_is_designated and not possessor_is_content_word:
+                    kinds.append('other')
+                    is_first_quote = False
+                    search_start = qpos + len(q)
+                    continue
+            if RECEIVE_ATTRIBUTION_LOOKAHEAD_PAT.match(rest_of_text[:60]):
                 kinds.append('other')
                 is_first_quote = False
                 search_start = qpos + len(q)
