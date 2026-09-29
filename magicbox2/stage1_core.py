@@ -8,7 +8,7 @@
     kept_quotes, review_flag, review_note = ex.extract_row(f_text)
 """
 import re
-from title_master_list import TITLE_LIST, PARTY_NAMES, BARE_OTHER_WORDS, COMMON_SURNAMES, RECEIVED_CONTENT_NOUNS
+from title_master_list import TITLE_LIST, PARTY_NAMES, BARE_OTHER_WORDS, COMMON_SURNAMES, RECEIVED_CONTENT_NOUNS, SELF_ONLY_SHORT_TITLES
 
 QUOTE_PAT = re.compile(r'"[^"]*"|“[^”]*”')
 SINGLE_QUOTE_SPAN = re.compile(r'[\u2018\u2019\']')
@@ -105,6 +105,7 @@ class Stage1Extractor:
             self.CURRENT_POST_PAT = None
 
         title_pat = r'(?:제?[0-9]\s?)?(?:공동|창당준비)*(?:(?:신임|전임)\s?)?(?:' + '|'.join(sorted(set(TITLE_LIST), key=len, reverse=True)) + r')'
+        self_title_pat = r'(?:제?[0-9]\s?)?(?:공동|창당준비)*(?:(?:신임|전임)\s?)?(?:' + '|'.join(sorted(set(TITLE_LIST) | set(SELF_ONLY_SHORT_TITLES), key=len, reverse=True)) + r')'
         party_alt = '|'.join(sorted(PARTY_NAMES, key=len, reverse=True))
         # 복합 직함(예: '당 대표 비서실장', '원내대표 비서실장')의 앞부분을 위한 선택적 삽입 허용
         title_prefix = r'(?:당\s?대표|원내대표|최고위원|위원장|대표|대통령실|대통령|국회)?\s?(?:[가-힣]{1,4}(?=지사|시장|군수|교육감|구청장))?\s?'
@@ -123,10 +124,10 @@ class Stage1Extractor:
         # 다만 '~한/~된'류 절(용언 활용형)과 혼동되지 않도록 짧은 길이로 제한한다.
         self.FULLNAME_TITLE_PAT = re.compile(
             pre_party + re.escape(designated) + connector
-            + r'(?:(?:' + title_pat + r')|[가-힣]{1,8}\s?[가-힣]{0,6})?' + title_suffix + josa + end
+            + r'(?:(?:' + self_title_pat + r')|[가-힣]{1,8}\s?[가-힣]{0,6})?' + title_suffix + josa + end
         )
         self.ANY_NAME_TITLE_PAT = re.compile(r'([가-힣]{2,6})' + connector + r'(?:' + title_pat + r')' + title_suffix + josa + end)
-        self.SURNAME_TITLE_PAT = re.compile(surname + connector + r'(?:' + title_pat + r')' + title_suffix + josa + end)
+        self.SURNAME_TITLE_PAT = re.compile(surname + connector + r'(?:' + self_title_pat + r')' + title_suffix + josa + end)
         # 정당명+직함(이름 없이) 구조, 복수(들)에 한정 (예: "민주당 의원들은") -
         # 단수형("민주당 의원은")은 의도적으로 제외한다 - 이는 지정발언자 본인을
         # 이름 없이 '소속 정당+직함'만으로 가리키는 경우와 구별이 안 되기 때문이다
@@ -761,14 +762,25 @@ class Stage1Extractor:
         if notes:
             reasons.append(notes)
         if orig_quotes and not kept:
-            reasons.append('!!이 행의 인용문이 전부 사라짐!!')
+            reasons.append('!!인용문이 자동판정으로 전부 제외되어 원문 그대로 복원함 - 확인 필요!!')
+            kept = list(orig_quotes)
         # 2026년 추가(편집인 제안): "[제3자A]는 '~', [designated 또는 제3자B]는
         # '~'라고 했다"처럼, 서로 다른 이름(직함 포함)의 인물이 2명 이상 나오고
         # 각각 인용문이 붙어있는 구조는 화자 귀속이 자동판별로 불안정할 수 있으므로,
         # 인용문 개수 자체는 안 줄었더라도 점검필요로 표시한다.
+        # 단, 인용문(큰따옴표/작은따옴표) "안"에서 언급되는 이름(예: "박정희 전 대통령이
+        # 김대중 전 대통령을..."처럼 인용문 내용 속 인물)은 경쟁하는 화자가 아니므로 제외한다.
+        quote_spans = [(m.start(), m.end()) for m in QUOTE_PAT.finditer(f_text)]
+        quote_spans += [(m.start(), m.end()) for m in re.finditer(r'\u2018[^\u2019]*\u2019|\'[^\']*\'', f_text)]
+
+        def _inside_any_quote(pos):
+            return any(s <= pos < e for s, e in quote_spans)
+
         distinct_names = set()
         for pat, group_idx in ((self.ANY_NAME_TITLE_PAT, 1), (self.GENERIC_OTHER_SURNAME_PAT, 1)):
             for m in pat.finditer(f_text):
+                if _inside_any_quote(m.start()):
+                    continue
                 try:
                     name = m.group(group_idx)
                 except (IndexError, re.error):
