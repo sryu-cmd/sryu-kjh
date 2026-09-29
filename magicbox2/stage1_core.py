@@ -20,7 +20,7 @@ COMPOUND_PREFIX_BLACKLIST = {'국무', '국회', '지방', '자치', '정부', '
                              '보건복지부', '복지부', '환경부', '고용노동부', '고용부',
                              '여성가족부', '여가부', '국토교통부', '국토부', '해양수산부', '해수부',
                              '중소벤처기업부', '중기부', '과학기술정보통신부', '과기정통부', '과기부',
-                             '중앙선대위', '선거대책위원회', '중앙선거대책위원회'}
+                             '중앙선대위', '선거대책위원회', '중앙선거대책위원회', '비서'}
 # 조사 교차확인용: 이은종속절 "~자"(묻자/하자/올리자 등) 표지
 JA_MARK = re.compile(r'[가-힣]{1,4}자(?:,|\s)')
 ASK_VERB = re.compile(r'(묻자|물었다|질문했다|물어봤다)')
@@ -377,7 +377,7 @@ class Stage1Extractor:
         반환: (남긴 인용문 리스트, 검토필요 인용문 목록)"""
         quotes = QUOTE_PAT.findall(f_text)
         if not quotes:
-            return quotes, []
+            return quotes, [], []
 
         # 같은 성씨지만 이 기사에서 확인된 지정발언자의 호칭과 다른 호칭이면
         # 동명이인(다른 사람)으로 본다 (예: "윤 의원"=지정발언자, "윤 변호사"=다른 사람).
@@ -618,7 +618,7 @@ class Stage1Extractor:
             search_start = qpos + len(q)
         kept = [q for q, k in zip(quotes, kinds) if k != 'other' and q not in self_ref_quotes]
         review = [q for q, k in zip(quotes, kinds) if k == 'low_review' and q not in self_ref_quotes]
-        return kept, review
+        return kept, review, kinds
 
     def _filter_possessive_and_title(self, f_text, quotes):
         """소유격 삽입절 / 기사제목 인용 필터."""
@@ -749,7 +749,7 @@ class Stage1Extractor:
         e_text: 발췌문단(E열). F열보다 더 넓은 문맥(귀속 문장 등)을 담고 있는 경우가 있어,
         역참조("이 같이 밝히며" 등) 확인 시 F열뿐 아니라 E열도 함께 살펴본다."""
         orig_quotes = QUOTE_PAT.findall(f_text)
-        quotes_after_speaker_filter, low_review = self._filter_third_party(f_text, is_article_first, e_text)
+        quotes_after_speaker_filter, low_review, raw_kinds = self._filter_third_party(f_text, is_article_first, e_text)
         kept, need_review, notes = self._filter_possessive_and_title(f_text, quotes_after_speaker_filter)
 
         reasons = []
@@ -761,15 +761,8 @@ class Stage1Extractor:
             reasons.append('언급vs화자 모호(측근/정당 등 비발언 서술 가능성)')
         if notes:
             reasons.append(notes)
-        if orig_quotes and not kept:
-            reasons.append('!!인용문이 자동판정으로 전부 제외되어 원문 그대로 복원함 - 확인 필요!!')
-            kept = list(orig_quotes)
-        # 2026년 추가(편집인 제안): "[제3자A]는 '~', [designated 또는 제3자B]는
-        # '~'라고 했다"처럼, 서로 다른 이름(직함 포함)의 인물이 2명 이상 나오고
-        # 각각 인용문이 붙어있는 구조는 화자 귀속이 자동판별로 불안정할 수 있으므로,
-        # 인용문 개수 자체는 안 줄었더라도 점검필요로 표시한다.
-        # 단, 인용문(큰따옴표/작은따옴표) "안"에서 언급되는 이름(예: "박정희 전 대통령이
-        # 김대중 전 대통령을..."처럼 인용문 내용 속 인물)은 경쟁하는 화자가 아니므로 제외한다.
+        # 인용문(큰따옴표/작은따옴표) "안"에서 언급되는 이름(예: "박정희 전 대통령이 김대중 전
+        # 대통령을..."처럼 인용문 내용 속 인물)은 화자 후보가 아니므로 이름 탐색에서 제외한다.
         quote_spans = [(m.start(), m.end()) for m in QUOTE_PAT.finditer(f_text)]
         quote_spans += [(m.start(), m.end()) for m in re.finditer(r'\u2018[^\u2019]*\u2019|\'[^\']*\'', f_text)]
 
@@ -788,6 +781,19 @@ class Stage1Extractor:
                 if name and name not in PARTY_NAMES and name not in COMPOUND_PREFIX_BLACKLIST \
                         and name != self.designated and name not in self.designated:
                     distinct_names.add(name)
+        # 전부 제외된 경우: "명확한 제3자 이름이 있어서 제외된 것"(예: "김 위원장은 '~'고
+        # 했다")과 "화자 이름이 아예 없이 '~는 지적/질문'류 관형사절만으로 제3자로 추정한
+        # 것"(예: 주어 생략된 "'~'는 지적도 덧붙였다")을 구분한다. 전자는 확신할 수 있는
+        # 판정이므로 그대로 제외 유지, 후자는 추정일 뿐이므로 원문을 복원해 점검하게 한다.
+        if orig_quotes and not kept and ('other' not in raw_kinds or not distinct_names):
+            reasons.append('!!인용문이 자동판정으로 전부 제외되어 원문 그대로 복원함 - 확인 필요!!')
+            kept = list(orig_quotes)
+        elif orig_quotes and not kept:
+            reasons.append('!!이 행의 인용문이 전부 사라짐(제3자 발언으로 명확히 판정됨)!!')
+        # 2026년 추가(편집인 제안): "[제3자A]는 '~', [designated 또는 제3자B]는
+        # '~'라고 했다"처럼, 서로 다른 이름(직함 포함)의 인물이 2명 이상 나오고
+        # 각각 인용문이 붙어있는 구조는 화자 귀속이 자동판별로 불안정할 수 있으므로,
+        # 인용문 개수 자체는 안 줄었더라도 점검필요로 표시한다.
         if len(distinct_names) >= 2 and kept:
             reasons.append('!!복수 화자 구조(서로 다른 이름 2인 이상) - 귀속 확인 필요!!')
 
