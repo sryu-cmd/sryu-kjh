@@ -21,6 +21,8 @@ COMPOUND_PREFIX_BLACKLIST = {'국무', '국회', '지방', '자치', '정부', '
                              '여성가족부', '여가부', '국토교통부', '국토부', '해양수산부', '해수부',
                              '중소벤처기업부', '중기부', '과학기술정보통신부', '과기정통부', '과기부',
                              '중앙선대위', '선거대책위원회', '중앙선거대책위원회'}
+# 조사 교차확인용: 이은종속절 "~자"(묻자/하자/올리자 등) 표지
+JA_MARK = re.compile(r'[가-힣]{1,4}자(?:,|\s)')
 ASK_VERB = re.compile(r'(묻자|물었다|질문했다|물어봤다)')
 
 # 2026년 추가(편집인 제안): "행정안전부", "선대위"처럼 기관·조직을 나타내는
@@ -332,7 +334,7 @@ class Stage1Extractor:
                     has_boundary_after = any(p in between for p in self.BOUNDARY_PHRASES if p != '한 뒤')
             # "~하자"류 접속어미(문법 패턴이라 고정 어구 목록에 넣을 수 없음): 삽입절 주어의
             # 독립된 행동/반응을 나타내는 매우 흔한 신호다 (예: "최 처장이 머뭇거리자").
-            if not has_boundary_after and re.search(r'[가-힣]{1,3}자(?:,|\s)', between[:20]):
+            if not has_boundary_after and re.search(r'[가-힣]{1,3}자(?:,|\s)', between[:60]):
                 has_boundary_after = True
             if has_boundary_after:
                 topic_marked_designated = [c for c in candidates if c[2] in ('은', '는', '도') and c[1] == 'designated']
@@ -672,6 +674,69 @@ class Stage1Extractor:
         need_review = len(review_notes) > 0
         return kept, need_review, '; '.join(review_notes)
 
+    def _crosscheck_agrees(self, f_text, kept):
+        """조사 교차확인(2026년, 편집인 제안).
+        조사가 깨끗한 형태(지정발언자 은/는 + 타인 이/가)인 문장에서, 주어와 조사만으로 계산한
+        '기대 결과'가 실제 판정과 일치하면 True. 기대 결과 규칙: 인용문 앞에 타인 주어가 있고
+        그 사이에 절 끝 표지("~자" 등)가 없으면 타인의 발언, 표지가 있거나 타인 주어가 없으면
+        지정발언자의 발언. 인용문 바로 뒤에 표지 없이 지정발언자가 붙는 보어형은 지정발언자의 것."""
+        quotes = [(m.start(), m.end(), m.group()) for m in QUOTE_PAT.finditer(f_text)]
+        if not quotes:
+            return False
+        actual, j = [], 0
+        for _, _, q in quotes:
+            if j < len(kept) and kept[j] == q:
+                actual.append(True); j += 1
+            else:
+                actual.append(False)
+        single = [(m.start(), m.end()) for m in re.finditer(r"\u2018[^\u2019]*\u2019|'[^']*'", f_text)]
+
+        def inside_quote(pos):
+            return any(a <= pos < b for a, b, _ in quotes) or any(a <= pos < b for a, b in single)
+
+        def is_complement_of_doeda(end_pos):   # "비대위원장이 되는" 처럼 '~이 되다'의 보어
+            return bool(re.match(r'\s?되', f_text[end_pos:end_pos + 3]))
+
+        D, O = [], []
+        for pat in (self.FULLNAME_TITLE_PAT, self.SURNAME_TITLE_PAT):
+            for m in pat.finditer(f_text):
+                if not inside_quote(m.start()):
+                    D.append((m.start(), m.end(), m.group(1)))
+        for m in self.ANY_NAME_TITLE_PAT.finditer(f_text):
+            nm = m.group(1)
+            if inside_quote(m.start()) or is_complement_of_doeda(m.end()):
+                continue
+            if nm != self.designated and nm not in self.designated and nm not in PARTY_NAMES \
+                    and nm not in COMPOUND_PREFIX_BLACKLIST and nm not in TITLE_LIST:
+                O.append((m.start(), m.end(), m.group(2)))
+        for m in self.GENERIC_OTHER_SURNAME_PAT.finditer(f_text):
+            if not inside_quote(m.start()) and not is_complement_of_doeda(m.end()):
+                O.append((m.start(), m.end(), m.group(2)))
+        if not D or not O:
+            return False
+        if not (set(x[2] for x in D) <= {'은', '는'} and set(x[2] for x in O) <= {'이', '가'}):
+            return False       # 조사가 깨끗한 형태가 아니면 교차확인 대상이 아니다(표시 유지)
+        expected = []
+        for a, b, q in quotes:
+            prev_O = [o for o in O if o[0] < a]
+            if prev_O:
+                last = max(prev_O, key=lambda o: o[0])
+                seg = f_text[last[1]:a]
+                marker = bool(JA_MARK.search(seg)) or any(p in seg for p in self.BOUNDARY_PHRASES)
+                expected.append(marker)
+            else:
+                expected.append(True)
+        for i, (a, b, q) in enumerate(quotes):
+            nxt_q = quotes[i + 1][0] if i + 1 < len(quotes) else len(f_text)
+            later_D = [d for d in D if b <= d[0] < nxt_q]
+            if later_D:
+                gap = f_text[b:min(later_D, key=lambda d: d[0])[0]]
+                if len(gap.strip()) <= 20 and not JA_MARK.search(gap) \
+                        and not any(p in gap for p in self.BOUNDARY_PHRASES) \
+                        and not re.search(r'다[\s.,]|[.,]', gap):
+                    expected[i] = True
+        return actual == expected
+
     def extract_row(self, f_text, is_article_first=False, e_text=''):
         """전체 1단계 파이프라인: 발췌 -> 타인발언제외 -> 소유격/제목필터.
         반환: (최종 인용문 리스트, 점검필요 여부, 점검사유)
@@ -687,8 +752,10 @@ class Stage1Extractor:
         kept, need_review, notes = self._filter_possessive_and_title(f_text, quotes_after_speaker_filter)
 
         reasons = []
+        auto_excl_reason = None
         if len(orig_quotes) >= 2 and len(kept) != len(orig_quotes):
-            reasons.append(f'인용문 {len(orig_quotes)}개 중 {len(orig_quotes)-len(kept)}개 자동제외됨')
+            auto_excl_reason = f'인용문 {len(orig_quotes)}개 중 {len(orig_quotes)-len(kept)}개 자동제외됨'
+            reasons.append(auto_excl_reason)
         if low_review:
             reasons.append('언급vs화자 모호(측근/정당 등 비발언 서술 가능성)')
         if notes:
@@ -711,6 +778,11 @@ class Stage1Extractor:
                     distinct_names.add(name)
         if len(distinct_names) >= 2 and kept:
             reasons.append('!!복수 화자 구조(서로 다른 이름 2인 이상) - 귀속 확인 필요!!')
+
+        # 조사 교차확인: 표시 사유가 '자동제외' 하나뿐이고, 조사가 깨끗한 형태에서 실제 판정이
+        # 기대 결과와 일치하면 점검필요 표시는 생략하되, 점검사유 칸에 흔적을 남긴다.
+        if auto_excl_reason and reasons == [auto_excl_reason] and self._crosscheck_agrees(f_text, kept):
+            return kept, '', f'교차확인 통과(조사 형식 일치) - {auto_excl_reason}'
 
         point_check = '점검필요' if reasons else ''
         return kept, point_check, '; '.join(reasons)
