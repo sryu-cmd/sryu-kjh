@@ -108,7 +108,7 @@ class Stage1Extractor:
         self_title_pat = r'(?:제?[0-9]\s?)?(?:공동|창당준비)*(?:(?:신임|전임)\s?)?(?:' + '|'.join(sorted(set(TITLE_LIST) | set(SELF_ONLY_SHORT_TITLES), key=len, reverse=True)) + r')'
         party_alt = '|'.join(sorted(PARTY_NAMES, key=len, reverse=True))
         # 복합 직함(예: '당 대표 비서실장', '원내대표 비서실장')의 앞부분을 위한 선택적 삽입 허용
-        title_prefix = r'(?:당\s?대표|원내대표|최고위원|위원장|대표|대통령실|대통령|국회)?\s?(?:[가-힣]{1,4}(?=지사|시장|군수|교육감|구청장))?\s?'
+        title_prefix = r'(?:[가-힣]{1,4}(?=지사|시장|군수|교육감|구청장))?\s?'
         connector = (r'(?:\s?\([^)]{0,30}\))?'
                      r'(?:(?:\s전)?(?:\s(?:' + party_alt + r'))?(?:\s전)?)?'
                      r'\s?' + title_prefix)
@@ -124,10 +124,17 @@ class Stage1Extractor:
         # 다만 '~한/~된'류 절(용언 활용형)과 혼동되지 않도록 짧은 길이로 제한한다.
         self.FULLNAME_TITLE_PAT = re.compile(
             pre_party + re.escape(designated) + connector
-            + r'(?:(?:' + self_title_pat + r')|[가-힣]{1,8}\s?[가-힣]{0,6})?' + title_suffix + josa + end
+            + r'(?:(?:' + self_title_pat + r')|(?:[가-힣]{1,8}\s?){1,4})?' + title_suffix + josa + end
         )
         self.ANY_NAME_TITLE_PAT = re.compile(r'([가-힣]{2,6})' + connector + r'(?:' + title_pat + r')' + title_suffix + josa + end)
         self.SURNAME_TITLE_PAT = re.compile(surname + connector + r'(?:' + self_title_pat + r')' + title_suffix + josa + end)
+        # 2026년 추가(편집인 제안, 강훈식 160그룹): 인용문 "안"에 지정발언자 자신의
+        # [성+직함] 또는 [성명+직함]이 3인칭으로 언급되면, 그 인용문은 지정발언자 본인의
+        # 발언이 아니다(자기 발언 안에서 자신을 성+직함으로 3인칭 지칭하는 경우는 매우 드묾).
+        # 인용문 내용 안에서는 조사가 없는 경우가 많으므로 조사를 요구하지 않는다.
+        self.SELF_THIRD_PERSON_IN_QUOTE_PAT = re.compile(
+            re.escape(designated) + r'\s(?:' + self_title_pat + r')'
+        )
         # 정당명+직함(이름 없이) 구조, 복수(들)에 한정 (예: "민주당 의원들은") -
         # 단수형("민주당 의원은")은 의도적으로 제외한다 - 이는 지정발언자 본인을
         # 이름 없이 '소속 정당+직함'만으로 가리키는 경우와 구별이 안 되기 때문이다
@@ -141,7 +148,7 @@ class Stage1Extractor:
         # 흔한 한국 성씨 목록으로 한정해 오탐 위험을 낮춘다 (임의의 한 글자를 성으로 보지 않는다).
         common_surnames = [s for s in COMMON_SURNAMES if s != surname]
         self.GENERIC_OTHER_SURNAME_PAT = re.compile(
-            r'(?<![가-힣])(' + '|'.join(common_surnames) + r')\s?(?:' + title_pat + r')' + title_suffix + josa + end
+            r'(?<![가-힣])(' + '|'.join(common_surnames) + r')(?:\s?전)?\s?(?:' + title_pat + r')' + title_suffix + josa + end
         )
         # '전'(성씨)+직함 - 다만 '전'은 'ex-' 접두어로도 쓰이므로("김 전 원내대표"=
         # 김씨의 예전 원내대표), 앞에 다른 이름/성이 없을 때만("전 원내대표"처럼
@@ -751,6 +758,9 @@ class Stage1Extractor:
         orig_quotes = QUOTE_PAT.findall(f_text)
         quotes_after_speaker_filter, low_review, raw_kinds = self._filter_third_party(f_text, is_article_first, e_text)
         kept, need_review, notes = self._filter_possessive_and_title(f_text, quotes_after_speaker_filter)
+        before_self_ref_filter = len(kept)
+        kept = [q for q in kept if not self.SELF_THIRD_PERSON_IN_QUOTE_PAT.search(q)]
+        removed_by_self_ref_filter = before_self_ref_filter > len(kept)
 
         reasons = []
         auto_excl_reason = None
@@ -785,11 +795,14 @@ class Stage1Extractor:
         # 했다")과 "화자 이름이 아예 없이 '~는 지적/질문'류 관형사절만으로 제3자로 추정한
         # 것"(예: 주어 생략된 "'~'는 지적도 덧붙였다")을 구분한다. 전자는 확신할 수 있는
         # 판정이므로 그대로 제외 유지, 후자는 추정일 뿐이므로 원문을 복원해 점검하게 한다.
-        if orig_quotes and not kept and ('other' not in raw_kinds or not distinct_names):
+        if orig_quotes and not kept and not removed_by_self_ref_filter and ('other' not in raw_kinds or not distinct_names):
             reasons.append('!!인용문이 자동판정으로 전부 제외되어 원문 그대로 복원함 - 확인 필요!!')
             kept = list(orig_quotes)
         elif orig_quotes and not kept:
-            reasons.append('!!이 행의 인용문이 전부 사라짐(제3자 발언으로 명확히 판정됨)!!')
+            # 2026년 추가(편집인 제안, 강훈식 139그룹): 이름 있는 제3자가 명확히 확인되어
+            # 전부 제외된 경우는 애매함이 없으므로 점검필요를 붙이지 않는다(사유만 조용히 기록).
+            silent_reason = '제3자 발언으로 명확히 판정되어 전부 제외됨(점검불요)' if not removed_by_self_ref_filter \
+                else '인용문 안에 본인의 성/성명+직함이 3인칭으로 언급되어 본인 발언이 아닌 것으로 판정됨(점검불요)'
         # 2026년 추가(편집인 제안): "[제3자A]는 '~', [designated 또는 제3자B]는
         # '~'라고 했다"처럼, 서로 다른 이름(직함 포함)의 인물이 2명 이상 나오고
         # 각각 인용문이 붙어있는 구조는 화자 귀속이 자동판별로 불안정할 수 있으므로,
@@ -803,4 +816,5 @@ class Stage1Extractor:
             return kept, '', f'교차확인 통과(조사 형식 일치) - {auto_excl_reason}'
 
         point_check = '점검필요' if reasons else ''
-        return kept, point_check, '; '.join(reasons)
+        final_notes = '; '.join(reasons) if reasons else (locals().get('silent_reason') or '')
+        return kept, point_check, final_notes
