@@ -20,7 +20,7 @@ COMPOUND_PREFIX_BLACKLIST = {'국무', '국회', '지방', '자치', '정부', '
                              '보건복지부', '복지부', '환경부', '고용노동부', '고용부',
                              '여성가족부', '여가부', '국토교통부', '국토부', '해양수산부', '해수부',
                              '중소벤처기업부', '중기부', '과학기술정보통신부', '과기정통부', '과기부',
-                             '중앙선대위', '선거대책위원회', '중앙선거대책위원회', '비서'}
+                             '중앙선대위', '선거대책위원회', '중앙선거대책위원회', '비서', '원내정책수석'}
 # 조사 교차확인용: 이은종속절 "~자"(묻자/하자/올리자 등) 표지
 JA_MARK = re.compile(r'[가-힣]{1,4}자(?:,|\s)')
 ASK_VERB = re.compile(r'(묻자|물었다|질문했다|물어봤다)')
@@ -124,7 +124,7 @@ class Stage1Extractor:
         # 다만 '~한/~된'류 절(용언 활용형)과 혼동되지 않도록 짧은 길이로 제한한다.
         self.FULLNAME_TITLE_PAT = re.compile(
             pre_party + re.escape(designated) + connector
-            + r'(?:(?:' + self_title_pat + r')|(?:[가-힣]{1,8}\s?){1,4})?' + title_suffix + josa + end
+            + r'(?:(?:' + self_title_pat + r')|(?:[가-힣]{1,12}\s?){1,4})?' + title_suffix + josa + end
         )
         self.ANY_NAME_TITLE_PAT = re.compile(r'([가-힣]{2,6})' + connector + r'(?:' + title_pat + r')' + title_suffix + josa + end)
         self.SURNAME_TITLE_PAT = re.compile(surname + connector + r'(?:' + self_title_pat + r')' + title_suffix + josa + end)
