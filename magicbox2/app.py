@@ -36,11 +36,11 @@ def build_output_prefix(input_filename, designated):
     return designated
 
 
-def run_stage1(data, header, designated, surname, current_posts=None):
+def run_stage1(data, header, designated, surname, current_posts=None, temp_abbrev_titles=None):
     idx = {n: i for i, n in enumerate(header)}
     f_i = idx["발췌문장"]
     e_i = idx.get("발췌문단")
-    ex = Stage1Extractor(designated, surname, current_posts=current_posts)
+    ex = Stage1Extractor(designated, surname, current_posts=current_posts, temp_abbrev_titles=temp_abbrev_titles)
     out_header = header + ["인용문(발췌)", "점검필요", "점검사유"]
     out_rows = [out_header]
     point_check_n, none_n = 0, 0
@@ -111,6 +111,13 @@ current_posts_input = st.text_input(
     "현재 직책명 (선택, 쉼표로 구분) — 예: 행정안전부 장관, 행안부 장관",
     help="지정발언자가 현재 맡고 있어서 이름 없이 직책명만으로도 본인을 가리키는 경우가 있으면 입력하세요."
 )
+temp_abbrev_input = st.text_input(
+    "성+약칭 (선택, 쉼표로 구분, 성 제외하고 뒷부분만) — 예: 원내부대표, 수석부대표",
+    help="이 파일에서만 임시로 '성+이 약칭'을 지정발언자로 인식합니다. 아직 title_master_list.py에 "
+         "영구 등록된 것이 아니므로, 같은 성의 다른 사람과 겹칠 위험(동성이칭)이 검증되지 않았습니다. "
+         "그래서 이 약칭이 쓰인 행에는 결과가 맞더라도 무조건 점검필요 표시가 붙습니다. 여러 파일에서 "
+         "문제없다고 확인되면 전문편집인에게 알려 영구 등록하세요."
+)
 uploaded = st.file_uploader(
     "입력 CSV 파일 (이름, URL, 신문사, 제목, 발췌문단, 발췌문장, 일자 열 포함)", type="csv"
 )
@@ -126,7 +133,9 @@ if uploaded and designated and surname and st.button("실행", type="primary"):
 
     with st.spinner(f"1단계 처리 중... ({len(data)}행)"):
         current_posts = [p.strip() for p in current_posts_input.split(",")] if current_posts_input else []
-        s1_rows, stats = run_stage1(data, header, designated, surname, current_posts=current_posts)
+        temp_abbrev_titles = [p.strip() for p in temp_abbrev_input.split(",")] if temp_abbrev_input else []
+        s1_rows, stats = run_stage1(data, header, designated, surname,
+                                     current_posts=current_posts, temp_abbrev_titles=temp_abbrev_titles)
     st.write("1단계 완료:", stats)
 
     s1_header, s1_data = s1_rows[0], s1_rows[1:]
