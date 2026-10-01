@@ -90,7 +90,7 @@ REVIEW_RATIO_THRESHOLD = 0.70
 
 
 class Stage1Extractor:
-    def __init__(self, designated: str, surname: str, current_posts=None):
+    def __init__(self, designated: str, surname: str, current_posts=None, temp_abbrev_titles=None):
         self.designated = designated
         self.surname = surname
         # 2026년 추가(편집인 제안): 지정발언자가 현재 맡고 있는 관공서 직책(예:
@@ -103,6 +103,20 @@ class Stage1Extractor:
             self.CURRENT_POST_PAT = re.compile(r'(?:' + posts_alt + r')(은|는|이|가|도)(?=[\s,.\"“”‘’]|$)')
         else:
             self.CURRENT_POST_PAT = None
+
+        # 2026년 추가(편집인 제안): "성+약칭"은 title_master_list.py(공용 목록, 5명
+        # 회귀테스트 대상)에 영구 등록하기 전에, 이 파일 처리에서만 임시로 쓸 수 있게
+        # 한다. 동성이칭(같은 성+같은 약칭을 쓰는 다른 사람) 위험이 아직 이 파일에서
+        # 검증되지 않았으므로, 매치되는 행마다 무조건 점검필요를 붙여 사람이 확인하게
+        # 한다. 여러 파일에서 문제없이 확인되면 그때 title_master_list.py에 영구 등록한다.
+        self.temp_abbrev_titles = [t.strip() for t in (temp_abbrev_titles or []) if t.strip()]
+        if self.temp_abbrev_titles:
+            abbrev_alt = '|'.join(sorted(self.temp_abbrev_titles, key=len, reverse=True))
+            self.TEMP_ABBREV_PAT = re.compile(
+                re.escape(surname) + r'\s?(?:' + abbrev_alt + r')(은|는|이|가|도)(?=[\s,.\"“”‘’]|$)'
+            )
+        else:
+            self.TEMP_ABBREV_PAT = None
 
         title_pat = r'(?:제?[0-9]\s?)?(?:공동|창당준비)*(?:(?:신임|전임)\s?)?(?:' + '|'.join(sorted(set(TITLE_LIST), key=len, reverse=True)) + r')'
         self_title_pat = r'(?:제?[0-9]\s?)?(?:공동|창당준비)*(?:(?:신임|전임)\s?)?(?:' + '|'.join(sorted(set(TITLE_LIST) | set(SELF_ONLY_SHORT_TITLES), key=len, reverse=True)) + r')'
@@ -123,18 +137,16 @@ class Stage1Extractor:
         # 일일이 목록에 등록하지 않아도 인식되도록 대체 경로(fallback)를 둔다.
         # 다만 '~한/~된'류 절(용언 활용형)과 혼동되지 않도록 짧은 길이로 제한한다.
         self.FULLNAME_TITLE_PAT = re.compile(
-            pre_party + re.escape(designated) + connector
+            pre_party + re.escape(designated) + connector + r'(?!\s?씨)'
             + r'(?:(?:' + self_title_pat + r')|(?:[가-힣]{1,12}\s?){1,4})?' + title_suffix + josa + end
         )
+        # 2026년 추가(편집인 제안): 지정발언자는 기사에서 '씨'라는 호칭으로 불리지 않는다.
+        # "[성명]씨는"이 나오면 이는 동명이인(제3자)이라는 뜻이므로, 후보를 아예 안 만드는
+        # 것(결과적으로 '후보없음'->기본값인 designated로 처리됨)이 아니라, 명시적으로
+        # '제3자' 후보로 등록해야 한다.
+        self.NAME_SSI_OTHER_PAT = re.compile(re.escape(designated) + r'\s?씨' + josa + end)
         self.ANY_NAME_TITLE_PAT = re.compile(r'([가-힣]{2,6})' + connector + r'(?:' + title_pat + r')' + title_suffix + josa + end)
         self.SURNAME_TITLE_PAT = re.compile(surname + connector + r'(?:' + self_title_pat + r')' + title_suffix + josa + end)
-        # 2026년 추가(편집인 제안, 강훈식 160그룹): 인용문 "안"에 지정발언자 자신의
-        # [성+직함] 또는 [성명+직함]이 3인칭으로 언급되면, 그 인용문은 지정발언자 본인의
-        # 발언이 아니다(자기 발언 안에서 자신을 성+직함으로 3인칭 지칭하는 경우는 매우 드묾).
-        # 인용문 내용 안에서는 조사가 없는 경우가 많으므로 조사를 요구하지 않는다.
-        self.SELF_THIRD_PERSON_IN_QUOTE_PAT = re.compile(
-            re.escape(designated) + r'\s(?:' + self_title_pat + r')'
-        )
         # 정당명+직함(이름 없이) 구조, 복수(들)에 한정 (예: "민주당 의원들은") -
         # 단수형("민주당 의원은")은 의도적으로 제외한다 - 이는 지정발언자 본인을
         # 이름 없이 '소속 정당+직함'만으로 가리키는 경우와 구별이 안 되기 때문이다
@@ -193,7 +205,7 @@ class Stage1Extractor:
         # 지역명이 다양해 일일이 목록화하지 않고 접미어로 일반화한다.
         self.BRANCH_OFFICE_PAT = re.compile(r'[가-힣]{2,4}(?:지검|지법|지청)(은|는|이|가|도)' + end)
         # 자기지시 배제용: 인용문 '내용 안'에서 [지정발언자 성명+호칭]을 찾는다 (조사 유무 무관, 문장 어디든)
-        self.SELF_REFERENCE_PAT = re.compile(re.escape(designated) + r'\s?(?:전\s)?' + title_pat)
+        self.SELF_REFERENCE_PAT = re.compile(re.escape(designated) + r'\s?(?:전\s)?' + self_title_pat)
         # "이렇게/이같이/이처럼 + 표현했다 등" - 앞선 인용문을 도로 가리키는 역참조 구조
         # (편집인 제안, 2026년: "앞 문단 없음" 예외 규칙에 사용)
         self.BACKREF_PAT = re.compile(
@@ -241,15 +253,26 @@ class Stage1Extractor:
 
         for m in self.FULLNAME_TITLE_PAT.finditer(span):
             candidates.append((m.start(), 'designated', m.group(1)))
+        for m in self.NAME_SSI_OTHER_PAT.finditer(span):
+            candidates.append((m.start(), 'other', m.group(0)))
         for m in self.SURNAME_TITLE_PAT.finditer(span):
             candidates.append((m.start(), 'designated', m.group(1)))
         for m in self.PARTY_TITLE_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(0)))
+        # 2026년 추가(편집인 제안): "[제3자]가 ~했다는/다고 [기사/내용/글 등]를
+        # 공유/인용/언급하면서 '[designated의 발언]'"처럼, 제3자 언급이 실은 명사(기사,
+        # 내용 등)를 수식하는 관형절의 주어일 뿐 화자가 아닌 경우를 걸러낸다.
+        REPORT_RELAY_AFTER_PAT = re.compile(
+            r'^(?:[가-힣\s0-9]{0,60}?)(?:기사|내용|글|보도|주장|발언|제보|메시지|인터뷰)(?:을|를)?\s?'
+            r'(?:[가-힣]{0,10}\s?)?(?:공유하|인용하|소개하|전하|언급하|다루|게재하|게시하|올리|쓰)(?:며|면서|고)'
+            r'|^(?:[가-힣\s0-9]{0,40}?)(?:지적|주장|비판|평가|설명)(?:하|했)(?:며|면서)'
+        )
         for m in self.ANY_NAME_TITLE_PAT.finditer(span):
             if m.group(1) != self.designated and m.group(1) not in self.designated \
                     and m.group(1) not in PARTY_NAMES \
                     and m.group(1) not in COMPOUND_PREFIX_BLACKLIST \
-                    and m.group(1) not in TITLE_LIST:
+                    and m.group(1) not in TITLE_LIST \
+                    and not REPORT_RELAY_AFTER_PAT.match(span[m.end():m.end() + 100]):
                 candidates.append((m.start(), 'other', m.group(2)))
 
         bare_low_confidence = []  # 기관/집단 명사: 언급 vs 화자 모호 -> 자동제외 대신 항상 검토 표시
@@ -291,11 +314,15 @@ class Stage1Extractor:
                 continue
             candidates.append((m.start(), 'other', m.group(0)))
         for m in self.GENERIC_OTHER_SURNAME_PAT.finditer(span):
-            candidates.append((m.start(), 'other', m.group(2)))
+            if not REPORT_RELAY_AFTER_PAT.match(span[m.end():m.end() + 100]):
+                candidates.append((m.start(), 'other', m.group(2)))
         for m in self.SURNAME_JEON_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(0)))
         if self.CURRENT_POST_PAT is not None:
             for m in self.CURRENT_POST_PAT.finditer(span):
+                candidates.append((m.start(), 'designated', m.group(1)))
+        if self.TEMP_ABBREV_PAT is not None:
+            for m in self.TEMP_ABBREV_PAT.finditer(span):
                 candidates.append((m.start(), 'designated', m.group(1)))
         for m in self.TITLE_ONLY_ACTING_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(2)))
@@ -405,7 +432,7 @@ class Stage1Extractor:
         # 단, 호칭 없이 '성명'만 있는 경우는 이 규칙에서 제외한다(본인이 자기 이름만 언급하는 경우는 흔함).
         self_ref_quotes = set()
         for q in quotes:
-            if self.SELF_REFERENCE_PAT.search(q):
+            if self.SELF_REFERENCE_PAT.search(self._mask_single_quoted(q)):
                 self_ref_quotes.add(q)
 
         # 2026년 규칙 변경(편집인 제안): '인용문이 1개뿐이면 화자 판별 없이 무조건
@@ -456,6 +483,8 @@ class Stage1Extractor:
         # 주어(designated 포함) 본인의 것이므로 배제하면 안 된다.
         BARE_ATTRIBUTION_EXCEPTION_PAT = re.compile(
             r'^(?:이|가|라)?는\s?질문(?:을|를)\s?[가-힣\s]{0,10}(?:던졌|했다|제기했)'
+            r'|^(?:이|가|라)?는\s?(?:답(?:변)?|발언|지적)(?:을|를)\s?[가-힣\s]{0,10}'
+            r'(?:했다|한 것으로|밝혔|밝혀졌|드러났|전해졌)'
         )
         # 2026년 추가(편집인 제안, 복문 사례 분석): '"quote"는 [국민의힘 주진우 의원]의
         # 질의에'처럼 "는"과 명사 사이에 [소유자]+의 구문이 끼는 경우. 기존 패턴은
@@ -758,9 +787,60 @@ class Stage1Extractor:
         orig_quotes = QUOTE_PAT.findall(f_text)
         quotes_after_speaker_filter, low_review, raw_kinds = self._filter_third_party(f_text, is_article_first, e_text)
         kept, need_review, notes = self._filter_possessive_and_title(f_text, quotes_after_speaker_filter)
-        before_self_ref_filter = len(kept)
-        kept = [q for q in kept if not self.SELF_THIRD_PERSON_IN_QUOTE_PAT.search(q)]
-        removed_by_self_ref_filter = before_self_ref_filter > len(kept)
+
+        # 2026년 추가(편집인 제안): "quote"에 함께 웃었던/반응했던"처럼, 인용문 바로 뒤에
+        # 조사 "에"가 오고 반응동사가 이어지면, 그 "quote"는 실제 발언 내용이 아니라
+        # 과거 사건/발언을 가리키는 명칭(레이블)으로 쓰인 것이다.
+        LABEL_REACTION_PAT = re.compile(
+            r'^에\s?(?:함께\s)?(?:웃|침묵|동의|반발|분노|박수|공감|발끈|당황)'
+        )
+
+        def _is_label_not_speech(q):
+            pos = f_text.find(q)
+            if pos < 0:
+                return False
+            after = f_text[pos + len(q):pos + len(q) + 20]
+            return bool(LABEL_REACTION_PAT.match(after))
+
+        # 2026년 추가(편집인 제안, 455그룹): "①김용민 "quote""처럼 기사 제목/소제목에
+        # 쓰인 인용문은, 뒤에 귀속 서술어("라고 말했다" 등)가 전혀 없이 그 자체로
+        # 문장이 끝난다 - 실제 발언이 아니라 제목이다.
+        ATTRIBUTION_TAIL_PAT = re.compile(r'[가-힣]')
+
+        def _is_headline_quote(q):
+            pos = f_text.find(q)
+            if pos < 0:
+                return False
+            after = f_text[pos + len(q):].strip()
+            return not ATTRIBUTION_TAIL_PAT.search(after)
+
+        # 2026년 추가(편집인 제안, 455그룹): "①김용민 "quote""처럼 기사 제목/소제목에
+        # 쓰인 인용문은, 이름 바로 뒤에 직함이나 조사 없이 곧바로 인용문이 온다(정상적인
+        # 문장이라면 "김용민 의원은" 처럼 직함+조사가 있어야 함). F 전체도 짧다.
+        HEADLINE_NAME_PAT = re.compile(r'^[①-⑩\d.\-\s]{0,4}' + re.escape(self.designated) + r'\s?"')
+
+        def _is_headline_quote(q):
+            return len(f_text) < 80 and bool(HEADLINE_NAME_PAT.match(f_text)) and f_text.strip().endswith(q)
+
+        kept = [q for q in kept if not _is_label_not_speech(q) and not _is_headline_quote(q)]
+        # 2026년 추가(편집인 제안, 301/391그룹): "[designated]는 앞서 [제3자]가 "quote"
+        # 라고 말해 ~로부터 고발/소송당했다"처럼, 인용부호 위치가 모호해서 실제로는
+        # designated 자신이 한 말(제3자의 말을 전한 것)일 수도 있는 구조. 제3자 발언으로
+        # 판정되어 조용히 제외된 경우, 이 구조가 감지되면 점검필요로 표시해 사람이
+        # 직접 판단하게 한다(자동으로 되살리지는 않는다 - 판정 자체가 매우 어렵기 때문).
+        AMBIGUOUS_QUOTE_BOUNDARY_PAT = re.compile(
+            r'(?:라고|다고)\s?(?:말해|발언해|주장해)[가-힣\s,()]{0,25}(?:으)?로부터\s?[가-힣\s]{0,10}'
+            r'(?:고발|소송|명예훼손|고소|피소)'
+        )
+        ambiguous_boundary_excluded = [
+            q for q in orig_quotes if q not in kept and AMBIGUOUS_QUOTE_BOUNDARY_PAT.search(f_text)
+        ]
+        # 자기지시 배제 규칙(위 _filter_third_party 안의 SELF_REFERENCE_PAT) 또는
+        # 레이블/제목형 필터로 제외된 인용문이 있었는지 확인한다 - 있었다면 그건
+        # 애매함이 아니라 명확한 판정이다.
+        removed_by_self_ref_filter = any(
+            self.SELF_REFERENCE_PAT.search(self._mask_single_quoted(q)) for q in orig_quotes
+        ) or any(_is_label_not_speech(q) or _is_headline_quote(q) for q in orig_quotes)
 
         reasons = []
         auto_excl_reason = None
@@ -771,6 +851,10 @@ class Stage1Extractor:
             reasons.append('언급vs화자 모호(측근/정당 등 비발언 서술 가능성)')
         if notes:
             reasons.append(notes)
+        if self.TEMP_ABBREV_PAT is not None and self.TEMP_ABBREV_PAT.search(f_text):
+            reasons.append('!!임시 약칭 사용됨 - 동성이칭(같은 성+같은 약칭의 다른 사람) 여부 확인 필요!!')
+        if ambiguous_boundary_excluded:
+            reasons.append('!!인용부호 위치가 모호할 수 있음(제3자 발언 전달 중 고발 등 법적 결과 발생) - 확인 필요!!')
         # 인용문(큰따옴표/작은따옴표) "안"에서 언급되는 이름(예: "박정희 전 대통령이 김대중 전
         # 대통령을..."처럼 인용문 내용 속 인물)은 화자 후보가 아니므로 이름 탐색에서 제외한다.
         quote_spans = [(m.start(), m.end()) for m in QUOTE_PAT.finditer(f_text)]
@@ -791,6 +875,8 @@ class Stage1Extractor:
                 if name and name not in PARTY_NAMES and name not in COMPOUND_PREFIX_BLACKLIST \
                         and name != self.designated and name not in self.designated:
                     distinct_names.add(name)
+        if self.NAME_SSI_OTHER_PAT.search(f_text):
+            distinct_names.add(self.designated + '씨')
         # 전부 제외된 경우: "명확한 제3자 이름이 있어서 제외된 것"(예: "김 위원장은 '~'고
         # 했다")과 "화자 이름이 아예 없이 '~는 지적/질문'류 관형사절만으로 제3자로 추정한
         # 것"(예: 주어 생략된 "'~'는 지적도 덧붙였다")을 구분한다. 전자는 확신할 수 있는
