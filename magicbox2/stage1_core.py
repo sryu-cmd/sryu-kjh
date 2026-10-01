@@ -137,9 +137,14 @@ class Stage1Extractor:
         # 일일이 목록에 등록하지 않아도 인식되도록 대체 경로(fallback)를 둔다.
         # 다만 '~한/~된'류 절(용언 활용형)과 혼동되지 않도록 짧은 길이로 제한한다.
         self.FULLNAME_TITLE_PAT = re.compile(
-            pre_party + re.escape(designated) + connector + r'(?!\s?씨)'
+            pre_party + re.escape(designated) + connector + r'(?!\s?씨)(?!\s?의원실)'
             + r'(?:(?:' + self_title_pat + r')|(?:[가-힣]{1,12}\s?){1,4})?' + title_suffix + josa + end
         )
+        # 2026년 추가(편집인 제안): "지정발언자+의원실"은 지정발언자 본인이 아니라
+        # 그 사무실(보좌관 등)을 가리킨다 - 즉 타인이다. "씨" 규칙과 같은 이유로,
+        # 자가등록 fallback이 이를 새 직함으로 잘못 삼키지 않도록 막고, 명시적으로
+        # 제3자 후보로 등록한다.
+        self.NAME_OFFICE_OTHER_PAT = re.compile(re.escape(designated) + r'\s?의원실' + josa + end)
         # 2026년 추가(편집인 제안): 지정발언자는 기사에서 '씨'라는 호칭으로 불리지 않는다.
         # "[성명]씨는"이 나오면 이는 동명이인(제3자)이라는 뜻이므로, 후보를 아예 안 만드는
         # 것(결과적으로 '후보없음'->기본값인 designated로 처리됨)이 아니라, 명시적으로
@@ -254,6 +259,8 @@ class Stage1Extractor:
         for m in self.FULLNAME_TITLE_PAT.finditer(span):
             candidates.append((m.start(), 'designated', m.group(1)))
         for m in self.NAME_SSI_OTHER_PAT.finditer(span):
+            candidates.append((m.start(), 'other', m.group(0)))
+        for m in self.NAME_OFFICE_OTHER_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(0)))
         for m in self.SURNAME_TITLE_PAT.finditer(span):
             candidates.append((m.start(), 'designated', m.group(1)))
@@ -394,15 +401,18 @@ class Stage1Extractor:
             return True
         return False
 
-    def _known_titles_in_text(self, f_text):
-        """이 F텍스트 안에서 지정발언자의 이름과 실제로 함께 쓰인 직함들을 찾는다.
-        (편집인 제안, 2026년) 같은 기사 안에서 같은 사람을 서로 다른 호칭으로
+    def _known_titles_in_text(self, f_text, e_text=''):
+        """이 F텍스트(와 E텍스트) 안에서 지정발언자의 이름과 실제로 함께 쓰인 직함들을
+        찾는다. (편집인 제안, 2026년) 같은 기사 안에서 같은 사람을 서로 다른 호칭으로
         부르는 일은 거의 없다는 점을 이용해, '성씨는 같지만 이 기사에서 확인된
-        지정발언자의 호칭과 다른 호칭'이 나오면 이는 동명이인(다른 사람)으로 본다."""
+        지정발언자의 호칭과 다른 호칭'이 나오면 이는 동명이인(다른 사람)으로 본다.
+        F열에는 지정발언자의 풀네임이 아예 없는 경우가 많으므로(앞 문장에서만 소개되고
+        F열은 그 뒤를 잘라낸 경우), E열(발췌문단)도 함께 확인해야 안전하다."""
         found = set()
+        combined = f_text + '\n' + (e_text or '')
         for title in TITLE_LIST:
             if re.search(re.escape(self.designated) + r'\s?(?:전\s)?' + re.escape(title)
-                         + r'(?=[\s,.\"“”‘’은는이가도]|$)', f_text):
+                         + r'(?=[\s,.\"“”‘’은는이가도]|$)', combined):
                 found.add(title)
         return found
 
@@ -415,7 +425,7 @@ class Stage1Extractor:
 
         # 같은 성씨지만 이 기사에서 확인된 지정발언자의 호칭과 다른 호칭이면
         # 동명이인(다른 사람)으로 본다 (예: "윤 의원"=지정발언자, "윤 변호사"=다른 사람).
-        known_titles = self._known_titles_in_text(f_text)
+        known_titles = self._known_titles_in_text(f_text, e_text)
         self._same_surname_diff_title_pat = None
         if known_titles:
             other_titles = [t for t in TITLE_LIST if t not in known_titles]
@@ -877,6 +887,8 @@ class Stage1Extractor:
                     distinct_names.add(name)
         if self.NAME_SSI_OTHER_PAT.search(f_text):
             distinct_names.add(self.designated + '씨')
+        if self.NAME_OFFICE_OTHER_PAT.search(f_text):
+            distinct_names.add(self.designated + '의원실')
         # 전부 제외된 경우: "명확한 제3자 이름이 있어서 제외된 것"(예: "김 위원장은 '~'고
         # 했다")과 "화자 이름이 아예 없이 '~는 지적/질문'류 관형사절만으로 제3자로 추정한
         # 것"(예: 주어 생략된 "'~'는 지적도 덧붙였다")을 구분한다. 전자는 확신할 수 있는
