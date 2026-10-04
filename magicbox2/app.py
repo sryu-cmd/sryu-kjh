@@ -44,15 +44,24 @@ def run_stage1(data, header, designated, surname, current_posts=None, temp_abbre
     out_header = header + ["인용문(발췌)", "점검필요", "점검사유"]
     out_rows = [out_header]
     point_check_n, none_n = 0, 0
+    # 같은 기사(동일 일자·신문사·제목)의 앞 행들의 발췌문단을 모아 둔다. 동성 동호칭(예: "김 후보")이
+    # 지정발언자인지 같은 성의 다른 사람인지, 앞 문단에서 가장 가까운 풀네임으로 판정하는 데 쓴다.
+    date_i, news_i, title_i = idx.get("일자"), idx.get("신문사"), idx.get("제목")
+    cur_key, article_ctx = None, ""
     for r in data:
         f_text = r[f_i]
         e_text = r[e_i] if e_i is not None else ""
+        key = (r[date_i], r[news_i], r[title_i]) if None not in (date_i, news_i, title_i) else None
+        if key != cur_key:
+            cur_key, article_ctx = key, ""
         # '앞 문단이 없음'은 E열(발췌문단) 자체가 이 인용문으로 시작하는지로 직접
         # 확인한다(행 단위로 같은 기사인지 비교하는 것보다 직접적인 증거).
         is_article_first = bool(e_text.strip()) and e_text.strip().startswith('"') \
             and f_text.strip().startswith('"') \
             and e_text.strip()[:20] == f_text.strip()[:20]
-        kept, pc, notes = ex.extract_row(f_text, is_article_first, e_text)
+        kept, pc, notes = ex.extract_row(f_text, is_article_first, e_text, article_ctx, r[title_i] if title_i is not None else "")
+        if key is not None and e_text:
+            article_ctx += e_text + "\n"
         if pc:
             point_check_n += 1
         if not kept and f_text.strip():
