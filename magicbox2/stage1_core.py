@@ -89,6 +89,28 @@ PAREN_SPEAKER_PAT = re.compile(
 REVIEW_RATIO_THRESHOLD = 0.70
 
 
+def _same_person_title(t, k):
+    """두 직함이 같은 사람의 정식 호칭/약칭 관계인지.
+    한쪽이 다른 쪽의 끝부분(3자 이상)이면 약칭 관계(수석대변인/대변인, 원내정책수석부대표/부대표).
+    단 앞에 '부'(부대변인의 '부')가 붙는 경우는 다른 직책일 수 있어 제외. 앞 2자와 끝 3자가 같으면 변형."""
+    if t == k:
+        return True
+    a, b = (t, k) if len(t) <= len(k) else (k, t)
+    if len(a) >= 3 and b.endswith(a) and not b[:len(b) - len(a)].endswith('부'):
+        return True
+    if len(a) >= 4 and a[:2] == b[:2] and a[-3:] == b[-3:]:
+        return True
+    return False
+
+
+# 동성 동호칭 신원 판정으로 '다른 사람'이 확정됐을 때 인용문을 자동으로 제외할지 여부.
+# 김병주 파일 검토(2026년)에서 정확도가 14행 중 6행(약 43%)에 그쳤다: 같은 기사에 지정발언자의
+# 풀네임이 나온 행이 없는 경우가 많아(첫 소개가 인용문 없는 문단에 있음) '그러자 김 의원은'처럼 앞 사람에게
+# 반응하는 본인을 가장 가까운 다른 사람으로 오판한다. 본인 발언 누락(편집인 우선순위 2번)을 피하려고
+# 기본값은 제외하지 않고 점검필요만 붙이는 것이다.
+SURNAME_IDENT_EXCLUDE = False
+
+
 class Stage1Extractor:
     def __init__(self, designated: str, surname: str, current_posts=None, temp_abbrev_titles=None):
         self.designated = designated
@@ -121,6 +143,23 @@ class Stage1Extractor:
         title_pat = r'(?:제?[0-9]\s?)?(?:공동|창당준비)*(?:(?:신임|전임)\s?)?(?:' + '|'.join(sorted(set(TITLE_LIST), key=len, reverse=True)) + r')'
         self_title_pat = r'(?:제?[0-9]\s?)?(?:공동|창당준비)*(?:(?:신임|전임)\s?)?(?:' + '|'.join(sorted(set(TITLE_LIST) | set(SELF_ONLY_SHORT_TITLES), key=len, reverse=True)) + r')'
         party_alt = '|'.join(sorted(PARTY_NAMES, key=len, reverse=True))
+        self._party_alt = party_alt
+        # 2026년 추가(편집인 제안): 동성 동호칭("김 후보")이 지정발언자인지 같은 성의 다른 사람인지는
+        # 같은 기사(동일 일자·신문사·제목)의 앞 문단에서 가장 가까운 '같은 성 풀네임+호환 직함'으로 판정한다.
+        self._article_ctx = ''     # 같은 기사의 앞 행들의 발췌문단 (extract_row가 넣어 준다)
+        self._e_before_f = ''      # 이 행의 발췌문단 중 발췌문장 앞부분
+        self._titles_by_len = sorted(set(TITLE_LIST) | set(SELF_ONLY_SHORT_TITLES), key=len, reverse=True)
+        self.PRIOR_NAME_PAT = re.compile(r'(?<![가-힣])(' + re.escape(surname) + r'[가-힣]{1,2})(?![가-힣])')
+        # 성씨 글자로 시작하지만 사람 이름이 아닌 흔한 말(예: "이에 윤호중 대표는"의 '이에'). 사전 전체를 둘 수는
+        # 없으므로 이름 바로 뒤에 정당명/직함이 와야만 이름으로 인정하는 규칙과 함께 쓰는 보조 장치다.
+        self._not_names = {'이에', '이날', '이번', '이후', '이어', '이미', '이를', '이로', '이는', '이도', '이와', '이런', '이상',
+                           '이전', '이하', '이것', '이외', '이때', '이달', '이제', '이곳', '이튿', '이틀', '이같', '이처',
+                           '정부', '정치', '정당', '정책', '정도', '정말', '정상', '정리', '최근', '최대', '최소', '최초',
+                           '최종', '한편', '한국', '한때', '신임', '신규', '박수', '김치', '김밥'}
+        self._modifier_alt = '|'.join(sorted(set(TITLE_LIST), key=len, reverse=True))
+        self.surname_ident_log = []   # (판정, 근거 풀네임, 성+직함 표현) 확인용 기록
+        self._f_prefix = ''        # 지금 보는 구간(span) 앞쪽의 F열 텍스트
+        self._article_title = ''   # 이 행 기사의 제목(본인 풀네임이 제목에 있으면 근거로 인정)
         # 복합 직함(예: '당 대표 비서실장', '원내대표 비서실장')의 앞부분을 위한 선택적 삽입 허용
         title_prefix = r'(?:[가-힣]{1,4}(?=지사|시장|군수|교육감|구청장))?\s?'
         connector = (r'(?:\s?\([^)]{0,30}\))?'
@@ -252,6 +291,44 @@ class Stage1Extractor:
         r'^[^"]{0,6}(?:이|가|라)?(?:라고|고)?\s?(?:발언한|말한|주장한|지적한|비판한|밝힌|반박한|언급한|강조한|덧붙인)'
     )
 
+    def _surname_identity(self, matched, before_text, include_e=True):
+        """'김 후보'처럼 성+직함으로만 나온 표현의 신원 판정.
+        같은 기사의 앞쪽 문맥(앞 행들의 발췌문단, 이 행의 발췌문단 앞부분, 이 문장 앞부분)에서 '같은 성
+        풀네임+호환 직함'(전 여부도 일치)을 모두 찾아서:
+          - 지정발언자 풀네임만 있다 -> ('designated', 이름)
+          - 다른 사람 풀네임만 있다(지정발언자는 나오지 않음) -> ('other', 이름)   [확정: 이때만 제외]
+          - 둘 다 있다 -> ('ambiguous', 가장 가까운 다른 사람)  [지정발언자로 두되 점검필요]
+          - 하나도 없다 -> None (알 수 없음: 지금까지처럼 지정발언자로 본다)
+        단, 이름 바로 뒤에는 정당명이나 직함만 올 수 있고(임의의 단어 금지), '전' 표시 여부가 같아야 한다.
+        예) '이 전 대표'(이낙연)와 '이재명 대표'는 다른 사람이다."""
+        title = next((t for t in self._titles_by_len if t in matched[len(self.surname):]), None)
+        if not title:
+            return None
+        compat = {title} | {t for t in TITLE_LIST if t != title
+                            and (t.startswith(title) or title.startswith(t) or _same_person_title(t, title))}
+        compat_alt = '|'.join(sorted(compat, key=len, reverse=True))
+        want_former = bool(re.search(r'(?:^|\s)전\s', matched[len(self.surname):]))
+        follow = re.compile(r'\s?(?:(?:' + self._party_alt + r')\s)?(?:(?!전\s)(?:' + self._modifier_alt + r')\s)?'
+                            r'(?:(?P<former>전)\s)?(?:' + compat_alt + r')')
+        ctx = self._article_ctx + '\n' + (self._e_before_f if include_e else '') + '\n' + before_text
+        names = []   # 등장 순서
+        for nm in self.PRIOR_NAME_PAT.finditer(ctx):
+            name = nm.group(1)
+            if name[:2] in self._not_names or name in PARTY_NAMES or name in TITLE_LIST:
+                continue
+            fm = follow.match(ctx[nm.end(): nm.end() + 40])
+            if fm and bool(fm.group('former')) == want_former:
+                names.append(name)
+        if not names:
+            return None
+        others = [n for n in names if n != self.designated]
+        if not others:
+            return ('designated', self.designated)
+        if self.designated not in names:
+            # 다른 사람만 나오고 본인은 나오지 않음. 자동 제외는 정확도가 낮아 기본적으로 하지 않는다.
+            return ('other', others[-1]) if SURNAME_IDENT_EXCLUDE else ('likely_other', others[-1])
+        return ('ambiguous', others[-1])
+
     def _classify_span(self, raw_span, lookahead='', rest_of_text='', e_confirmed_designated=False):
         span = self._mask_single_quoted(raw_span)
         candidates = []  # (pos, kind, josa)
@@ -263,7 +340,20 @@ class Stage1Extractor:
         for m in self.NAME_OFFICE_OTHER_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(0)))
         for m in self.SURNAME_TITLE_PAT.finditer(span):
-            candidates.append((m.start(), 'designated', m.group(1)))
+            ident = self._surname_identity(m.group(0), self._f_prefix + span[:m.start()])
+            if ident and ident[0] == 'other':
+                self.surname_ident_log.append(('other', ident[1], m.group(0)))
+                candidates.append((m.start(), 'other', m.group(1)))
+            else:
+                if ident and ident[0] in ('ambiguous', 'likely_other'):
+                    self.surname_ident_log.append((ident[0], ident[1], m.group(0)))
+                elif ident is None:
+                    # 성+직함만으로 본인을 지칭했는데, 같은 기사(앞 문단·이 문단·이 문장 앞부분·제목) 어디에서도
+                    # 본인 풀네임을 확인할 수 없는 경우: 같은 성의 다른 사람일 수 있으나 프로그램이 알 방법이 없다.
+                    _ctx_all = self._article_ctx + '\n' + self._e_before_f + '\n' + self._f_prefix + span[:m.start()]
+                    if self.designated not in _ctx_all and self.designated not in self._article_title:
+                        self.surname_ident_log.append(('no_evidence', '', m.group(0)))
+                candidates.append((m.start(), 'designated', m.group(1)))
         for m in self.PARTY_TITLE_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(0)))
         # 2026년 추가(편집인 제안): "[제3자]가 ~했다는/다고 [기사/내용/글 등]를
@@ -422,7 +512,9 @@ class Stage1Extractor:
                 return True
         for m in self.SURNAME_TITLE_PAT.finditer(span):
             if m.group(1) in ('은', '는'):
-                return True
+                ident = self._surname_identity(m.group(0), self._f_prefix + span[:m.start()])
+                if not (ident and ident[0] == 'other'):
+                    return True
         weak_pat = re.compile(re.escape(self.surname) + r'\s?전\s?[가-힣]{1,4}\s?(은|는)(?=[\s,.\"“”‘’]|$)')
         if weak_pat.search(span):
             return True
@@ -460,18 +552,9 @@ class Stage1Extractor:
             # 다른 사람을 이렇게 혼동되게 쓰지 않는다"). 그래서 이미 확인된 호칭과 '약칭/변형'
             # 관계인 호칭은 다른 사람으로 보지 않는다.
             #  - 한쪽이 다른 쪽의 끝부분(3자 이상)이면 약칭 관계: 수석대변인/대변인,
-            #    원내정책수석부대표/수석부대표/부대표. 단 앞에 '부'(副)가 붙는 경우는
+            #    원내정책수석부대표/수석부대표/부대표. 단 앞에 '부'(부대변인의 '부')가 붙는 경우는
             #    다른 직책일 수 있어 제외(부대변인/대변인).
             #  - 앞 2자와 끝 3자가 같으면 변형: 원내정책수석부대표/원내부대표.
-            def _same_person_title(t, k):
-                if t == k:
-                    return True
-                a, b = (t, k) if len(t) <= len(k) else (k, t)
-                if len(a) >= 3 and b.endswith(a) and not b[:len(b) - len(a)].endswith('부'):
-                    return True
-                if len(a) >= 4 and a[:2] == b[:2] and a[-3:] == b[-3:]:
-                    return True
-                return False
             other_titles = [t for t in TITLE_LIST
                             if not any(_same_person_title(t, k) for k in known_titles)]
             if other_titles:
@@ -512,9 +595,16 @@ class Stage1Extractor:
         )
         e_confirmed_designated = False
         f_text_stripped = f_text.rstrip('.')
+        self._e_before_f = e_text[:e_text.find(f_text_stripped)] if (e_text and f_text_stripped and f_text_stripped in e_text) else ''
         if e_text and f_text_stripped and f_text_stripped in e_text:
             e_before_f = e_text[:e_text.find(f_text_stripped)]
-            if (self.FULLNAME_TITLE_PAT.search(e_before_f) or self.SURNAME_TITLE_PAT.search(e_before_f)) \
+            def _surname_designated_in(txt):
+                for _m in self.SURNAME_TITLE_PAT.finditer(txt):
+                    _id = self._surname_identity(_m.group(0), txt[:_m.start()], include_e=False)
+                    if not (_id and _id[0] == 'other'):
+                        return True
+                return False
+            if (self.FULLNAME_TITLE_PAT.search(e_before_f) or _surname_designated_in(e_before_f)) \
                     and '"' in e_before_f:
                 initial_state = 'designated'
                 current_state = 'designated'
@@ -581,6 +671,7 @@ class Stage1Extractor:
             span = f_text[search_start:qpos]
             lookahead = f_text[qpos + len(q): qpos + len(q) + 20]
             rest_of_text = f_text[qpos + len(q):]
+            self._f_prefix = f_text[:search_start]
             raw_kind = self._classify_span(span, lookahead, rest_of_text,
                                             e_confirmed_designated or initial_state == 'designated')
             # 2026년 추가(편집인 제안): 앞 인용문 바로 뒤(닫는 큰따옴표 직후)에
@@ -793,6 +884,11 @@ class Stage1Extractor:
         for pat in (self.FULLNAME_TITLE_PAT, self.SURNAME_TITLE_PAT):
             for m in pat.finditer(f_text):
                 if not inside_quote(m.start()):
+                    if pat is self.SURNAME_TITLE_PAT:
+                        _id = self._surname_identity(m.group(0), f_text[:m.start()])
+                        if _id and _id[0] == 'other':
+                            O.append((m.start(), m.end(), m.group(1)))
+                            continue
                     D.append((m.start(), m.end(), m.group(1)))
         for m in self.ANY_NAME_TITLE_PAT.finditer(f_text):
             nm = m.group(1)
@@ -829,7 +925,7 @@ class Stage1Extractor:
                     expected[i] = True
         return actual == expected
 
-    def extract_row(self, f_text, is_article_first=False, e_text=''):
+    def extract_row(self, f_text, is_article_first=False, e_text='', article_context='', article_title=''):
         """전체 1단계 파이프라인: 발췌 -> 타인발언제외 -> 소유격/제목필터.
         반환: (최종 인용문 리스트, 점검필요 여부, 점검사유)
         점검필요는 '검토필요(애매해서 보존)'뿐 아니라 '자동으로 인용문이 제외된 경우'도 포함한다
@@ -839,9 +935,16 @@ class Stage1Extractor:
         불분명하므로 제외")은 이 경우에만 적용한다.
         e_text: 발췌문단(E열). F열보다 더 넓은 문맥(귀속 문장 등)을 담고 있는 경우가 있어,
         역참조("이 같이 밝히며" 등) 확인 시 F열뿐 아니라 E열도 함께 살펴본다."""
+        # 같은 기사(동일 일자·신문사·제목)의 앞 행들의 발췌문단: 동성 동호칭 신원 판정에 쓴다
+        self._article_ctx = (article_context or '')[-8000:]
+        self._article_title = article_title or ''
+        self.surname_ident_log.clear()
         orig_quotes = QUOTE_PAT.findall(f_text)
         quotes_after_speaker_filter, low_review, raw_kinds = self._filter_third_party(f_text, is_article_first, e_text)
         kept, need_review, notes = self._filter_possessive_and_title(f_text, quotes_after_speaker_filter)
+        _ambiguous = sorted({nm for kind, nm, _mt in self.surname_ident_log if kind == 'ambiguous'})
+        _likely_other = sorted({nm for kind, nm, _mt in self.surname_ident_log if kind == 'likely_other'})
+        _no_evidence = [mt for kind, nm, mt in self.surname_ident_log if kind == 'no_evidence']
 
         # 2026년 추가(편집인 제안): "quote"에 함께 웃었던/반응했던"처럼, 인용문 바로 뒤에
         # 조사 "에"가 오고 반응동사가 이어지면, 그 "quote"는 실제 발언 내용이 아니라
@@ -906,6 +1009,15 @@ class Stage1Extractor:
             reasons.append('언급vs화자 모호(측근/정당 등 비발언 서술 가능성)')
         if notes:
             reasons.append(notes)
+        if _likely_other and kept:
+            reasons.append('!!성+직함이 같은 기사에 먼저 나온 다른 사람(' + ', '.join(_likely_other[:2])
+                           + ')을 가리킬 수 있음(본인 풀네임은 앞에 없음) - 본인 발언인지 확인 필요!!')
+        elif _ambiguous and kept:
+            reasons.append('!!같은 기사에 같은 성의 다른 사람(' + ', '.join(_ambiguous[:2])
+                           + ')도 나와 성+직함이 본인인지 불분명함 - 본인 발언인지 확인 필요!!')
+        elif _no_evidence and kept:
+            reasons.append('!!성+직함("' + _no_evidence[0].strip()[:8] + '")만으로 본인을 지칭했고, 같은 기사(앞 문단·제목)에서 '
+                           '본인 풀네임을 확인할 수 없음 - 본인 발언인지 확인 필요!!')
         if self.TEMP_ABBREV_PAT is not None and self.TEMP_ABBREV_PAT.search(f_text):
             reasons.append('!!임시 약칭 사용됨 - 동성이칭(같은 성+같은 약칭의 다른 사람) 여부 확인 필요!!')
         if ambiguous_boundary_excluded:
@@ -930,6 +1042,8 @@ class Stage1Extractor:
                 if name and name not in PARTY_NAMES and name not in COMPOUND_PREFIX_BLACKLIST \
                         and name != self.designated and name not in self.designated:
                     distinct_names.add(name)
+        _resolved_other = sorted({nm for kind, nm, _mt in self.surname_ident_log if kind == 'other'})
+        distinct_names.update(_resolved_other)
         if self.NAME_SSI_OTHER_PAT.search(f_text):
             distinct_names.add(self.designated + '씨')
         if self.NAME_OFFICE_OTHER_PAT.search(f_text):
@@ -952,11 +1066,22 @@ class Stage1Extractor:
             # 누락일 수 있다(실제로 이런 누락이 조용히 숨어 있었다). 조용히 넘기지 않고 점검필요로
             # 표시한다. 본인 3인칭 언급(자기지시) 배제는 명확한 신호이므로 그대로 둔다.
             if not removed_by_self_ref_filter:
+                def _is_designated_topic(pat, m):
+                    if m.group(1) not in ('은', '는', '도') or _inside_any_quote(m.start()):
+                        return False
+                    if pat is self.SURNAME_TITLE_PAT:
+                        _id = self._surname_identity(m.group(0), f_text[:m.start()])
+                        if _id and _id[0] == 'other':
+                            return False
+                    return True
                 _designated_as_topic = any(
-                    m.group(1) in ('은', '는', '도') and not _inside_any_quote(m.start())
+                    _is_designated_topic(pat, m)
                     for pat in (self.FULLNAME_TITLE_PAT, self.SURNAME_TITLE_PAT)
                     for m in pat.finditer(f_text)
                 )
+                if _resolved_other and not _designated_as_topic:
+                    reasons.append('!!성+직함 표현이 같은 기사 앞쪽의 풀네임(' + ', '.join(_resolved_other[:2])
+                                   + ')으로 판정되어 인용문이 전부 제외됨 - 본인 발언인지 확인 필요!!')
                 if _designated_as_topic:
                     reasons.append('!!본인이 주어로 나오는 문장인데 인용문이 전부 제3자 발언으로 제외됨 - 발췌누락 여부 확인 필요!!')
         # 2026년 추가(편집인 제안): "[제3자A]는 '~', [designated 또는 제3자B]는
