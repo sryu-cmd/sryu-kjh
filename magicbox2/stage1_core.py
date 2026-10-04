@@ -113,7 +113,7 @@ class Stage1Extractor:
         if self.temp_abbrev_titles:
             abbrev_alt = '|'.join(sorted(self.temp_abbrev_titles, key=len, reverse=True))
             self.TEMP_ABBREV_PAT = re.compile(
-                re.escape(surname) + r'\s?(?:' + abbrev_alt + r')(은|는|이|가|도)(?=[\s,.\"“”‘’]|$)'
+                r'(?<![가-힣])' + re.escape(surname) + r'\s?(?:' + abbrev_alt + r')(은|는|이|가|도)(?=[\s,.\"“”‘’]|$)'
             )
         else:
             self.TEMP_ABBREV_PAT = None
@@ -151,7 +151,7 @@ class Stage1Extractor:
         # '제3자' 후보로 등록해야 한다.
         self.NAME_SSI_OTHER_PAT = re.compile(re.escape(designated) + r'\s?씨' + josa + end)
         self.ANY_NAME_TITLE_PAT = re.compile(r'([가-힣]{2,6})' + connector + r'(?:' + title_pat + r')' + title_suffix + josa + end)
-        self.SURNAME_TITLE_PAT = re.compile(surname + connector + r'(?:' + self_title_pat + r')' + title_suffix + josa + end)
+        self.SURNAME_TITLE_PAT = re.compile(r'(?<![가-힣])' + surname + connector + r'(?:' + self_title_pat + r')' + title_suffix + josa + end)
         # 정당명+직함(이름 없이) 구조, 복수(들)에 한정 (예: "민주당 의원들은") -
         # 단수형("민주당 의원은")은 의도적으로 제외한다 - 이는 지정발언자 본인을
         # 이름 없이 '소속 정당+직함'만으로 가리키는 경우와 구별이 안 되기 때문이다
@@ -269,17 +269,43 @@ class Stage1Extractor:
         # 2026년 추가(편집인 제안): "[제3자]가 ~했다는/다고 [기사/내용/글 등]를
         # 공유/인용/언급하면서 '[designated의 발언]'"처럼, 제3자 언급이 실은 명사(기사,
         # 내용 등)를 수식하는 관형절의 주어일 뿐 화자가 아닌 경우를 걸러낸다.
+        # 2026년 확장(편집인 피드백, 권칠승 "문제 삼으며" 사례): 같은 규칙을 "점/것/사실을
+        # 문제 삼으며·비판하며"처럼 지정발언자 본인이 하는 발화성 행동에도 적용한다.
+        # "-며/-면서"는 같은 주어를 잇는 연결어미이므로, 지정발언자가 이미 은/는으로 제시된
+        # 문장에서 제3자가 '이/가'로 나오고 그 뒤에 이런 구조가 이어지면, 제3자는 수식절의
+        # 주어일 뿐이고 인용문은 지정발언자의 것이다.
         REPORT_RELAY_AFTER_PAT = re.compile(
-            r'^(?:[가-힣\s0-9]{0,60}?)(?:기사|내용|글|보도|주장|발언|제보|메시지|인터뷰)(?:을|를)?\s?'
-            r'(?:[가-힣]{0,10}\s?)?(?:공유하|인용하|소개하|전하|언급하|다루|게재하|게시하|올리|쓰)(?:며|면서|고)'
+            r'^(?:[가-힣\s0-9]{0,60}?)(?:기사|내용|글|보도|주장|발언|제보|메시지|인터뷰|점|것|사실|부분|대목|행태|행위|태도|처사|의혹)(?:을|를)?\s?'
+            r'(?:[가-힣]{0,10}\s?)?(?:공유하|인용하|소개하|전하|언급하|다루|게재하|게시하|올리|쓰|문제 삼|문제삼|비판하|비난하|지적하|꼬집|규탄하|반박하|거론하|강조하|우려하|겨냥하|질타하|힐난하)(?:으며|으면서|며|면서|고)'
             r'|^(?:[가-힣\s0-9]{0,40}?)(?:지적|주장|비판|평가|설명)(?:하|했)(?:며|면서)'
         )
+        # 안전장치: 이 규칙은 '지정발언자(은/는/도)'가 그 제3자보다 앞에 이미 나온 경우에만
+        # 적용한다. 지정발언자가 문장에 없으면 그 제3자가 실제 화자일 수 있고, 후보를
+        # 지우면 아무 후보도 없어 기본값(지정발언자)으로 잘못 처리되기 때문이다.
+        _designated_topic_starts = [c[0] for c in candidates if c[1] == 'designated' and c[2] in ('은', '는', '도')]
+
+        # 2026년 추가(편집인 피드백, 권칠승 458그룹 등): 인용문 바로 앞이 "…질문에", "…기자들과
+        # 만나", "…라디오에서"처럼 '주절 주어(지정발언자)의 답변/발언 장면'을 나타내는 말로
+        # 끝나면, 그 앞의 제3자(이/가)는 "이 대표가 이송된 병원에서", "정 전 총리가 언급한
+        # 결단의 뜻을 묻는 질문에"처럼 수식절 안의 주어일 뿐이고 인용문은 지정발언자의 것이다.
+        LEADIN_TAIL_PAT = re.compile(
+            r'(?:(?:질문|물음|질의|요청|추궁)(?:에는|에도|엔|에)\s*(?:대해서?\s*)?'
+            r'|(?:기자들|취재진|기자단)(?:과|에게)\s*(?:만나서?|만난\s*자리에서|전화로)?'
+            r'|(?:브리핑|기자회견|인터뷰|라디오|방송|간담회|토론회|청문회|회의|SNS|페이스북)(?:에서|에서는|에서도|에))\s*$'
+        )
+
+        def _is_relay_subject(m):
+            if not (_designated_topic_starts and min(_designated_topic_starts) < m.start()):
+                return False
+            return bool(REPORT_RELAY_AFTER_PAT.match(span[m.end():m.end() + 100])
+                        or LEADIN_TAIL_PAT.search(span[m.end():]))
+
         for m in self.ANY_NAME_TITLE_PAT.finditer(span):
             if m.group(1) != self.designated and m.group(1) not in self.designated \
                     and m.group(1) not in PARTY_NAMES \
                     and m.group(1) not in COMPOUND_PREFIX_BLACKLIST \
                     and m.group(1) not in TITLE_LIST \
-                    and not REPORT_RELAY_AFTER_PAT.match(span[m.end():m.end() + 100]):
+                    and not _is_relay_subject(m):
                 candidates.append((m.start(), 'other', m.group(2)))
 
         bare_low_confidence = []  # 기관/집단 명사: 언급 vs 화자 모호 -> 자동제외 대신 항상 검토 표시
@@ -321,7 +347,7 @@ class Stage1Extractor:
                 continue
             candidates.append((m.start(), 'other', m.group(0)))
         for m in self.GENERIC_OTHER_SURNAME_PAT.finditer(span):
-            if not REPORT_RELAY_AFTER_PAT.match(span[m.end():m.end() + 100]):
+            if not _is_relay_subject(m):
                 candidates.append((m.start(), 'other', m.group(2)))
         for m in self.SURNAME_JEON_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(0)))
@@ -347,7 +373,8 @@ class Stage1Extractor:
                 candidates.append((m.start(), 'other', m.group(2)))
         if self.GENERIC_OTHER_FORMER_TITLE_PAT is not None:
             for m in self.GENERIC_OTHER_FORMER_TITLE_PAT.finditer(span):
-                candidates.append((m.start(), 'other', m.group(2)))
+                if not _is_relay_subject(m):
+                    candidates.append((m.start(), 'other', m.group(2)))
 
         if not candidates:
             return 'low_review' if bare_low_confidence else 'none'
@@ -428,11 +455,29 @@ class Stage1Extractor:
         known_titles = self._known_titles_in_text(f_text, e_text)
         self._same_surname_diff_title_pat = None
         if known_titles:
-            other_titles = [t for t in TITLE_LIST if t not in known_titles]
+            # 2026년 수정(편집인 지적, 권칠승 파일): 같은 기사에서 "권칠승 수석대변인"과
+            # "권 대변인"처럼 정식 호칭과 약칭을 섞어 쓰는 것은 동일인이다("전문 기자가 서로
+            # 다른 사람을 이렇게 혼동되게 쓰지 않는다"). 그래서 이미 확인된 호칭과 '약칭/변형'
+            # 관계인 호칭은 다른 사람으로 보지 않는다.
+            #  - 한쪽이 다른 쪽의 끝부분(3자 이상)이면 약칭 관계: 수석대변인/대변인,
+            #    원내정책수석부대표/수석부대표/부대표. 단 앞에 '부'(副)가 붙는 경우는
+            #    다른 직책일 수 있어 제외(부대변인/대변인).
+            #  - 앞 2자와 끝 3자가 같으면 변형: 원내정책수석부대표/원내부대표.
+            def _same_person_title(t, k):
+                if t == k:
+                    return True
+                a, b = (t, k) if len(t) <= len(k) else (k, t)
+                if len(a) >= 3 and b.endswith(a) and not b[:len(b) - len(a)].endswith('부'):
+                    return True
+                if len(a) >= 4 and a[:2] == b[:2] and a[-3:] == b[-3:]:
+                    return True
+                return False
+            other_titles = [t for t in TITLE_LIST
+                            if not any(_same_person_title(t, k) for k in known_titles)]
             if other_titles:
                 other_title_pat = r'(?:' + '|'.join(sorted(other_titles, key=len, reverse=True)) + r')'
                 self._same_surname_diff_title_pat = re.compile(
-                    re.escape(self.surname) + r'\s?(?:' + other_title_pat + r')(은|는|이|가|도)'
+                    r'(?<![가-힣])' + re.escape(self.surname) + r'\s?(?:' + other_title_pat + r')(은|는|이|가|도)'
                     + r'(?=[\s,.\"“”‘’]|$)'
                 )
 
@@ -475,16 +520,16 @@ class Stage1Extractor:
                 current_state = 'designated'
                 e_confirmed_designated = True
 
-        QUESTION_LOOKAHEAD_PAT = re.compile(r'^(?:이|가|라)?는\s?(?:질문|질의|물음)(?:에|엔)|^(?:다|냐|나|가)는\s?(?:질문|질의|물음)(?:에|엔)')
+        QUESTION_LOOKAHEAD_PAT = re.compile(r'^(?:(?:이|가|라)?는|란)\s?(?:질문|질의|물음)(?:에|엔)|^(?:다|냐|나|가)는\s?(?:질문|질의|물음)(?:에|엔)')
         # 지정발언자가 질문자이고, 인용문이 그 질문에 대한 제3자의 답변인 경우
         # (예: "~고 물었더니 '~'라는 답이 돌아왔다"). 위 질문 패턴과는 반대 방향이다.
-        ANSWER_LOOKAHEAD_PAT = re.compile(r'^(?:이|가|라)?는\s?답(?:변)?이\s?돌아왔다')
+        ANSWER_LOOKAHEAD_PAT = re.compile(r'^(?:(?:이|가|라)?는|란)\s?답(?:변)?이\s?돌아왔다')
         # 2026년 추가(편집인 제안): "라는 답/발언/질문", "는 물음"이 인용문 바로 뒤에
         # 오면, 앞에 소유격 표시(OOO의)나 직함이 있든 없든 무조건 그 인용문은 다른
         # 누군가(질문자/발언자)의 것이다. "생략됐다고 없는 것이 아니라 생략된 것"
         # 이므로, 이 뒤에 나오는 은/는/이/가로 표시된 그 누구의 것도 될 수 없다.
         BARE_ATTRIBUTION_LOOKAHEAD_PAT = re.compile(
-            r'^(?:이|가|라)?는\s?(?:답(?:변)?|발언|질문|질의|물음|지적)'
+            r'^(?:(?:이|가|라)?는|란)\s?(?:답(?:변)?|발언|질문|질의|물음|지적)'
         )
         # 위 규칙의 예외(편집인 제안, 2026년): "quote"는 질문을 [던졌다/했다/제기했다]"
         # 처럼, "질문"이 여격(~에, 답변자로 전환)이 아니라 목적격(~을/를)이고 뒤에
@@ -492,8 +537,8 @@ class Stage1Extractor:
         # 은/는-주어 본인이 '직접 그 질문을 던진 행위'이다. 이 경우 인용문은 그
         # 주어(designated 포함) 본인의 것이므로 배제하면 안 된다.
         BARE_ATTRIBUTION_EXCEPTION_PAT = re.compile(
-            r'^(?:이|가|라)?는\s?질문(?:을|를)\s?[가-힣\s]{0,10}(?:던졌|했다|제기했)'
-            r'|^(?:이|가|라)?는\s?(?:답(?:변)?|발언|지적)(?:을|를)\s?[가-힣\s]{0,10}'
+            r'^(?:(?:이|가|라)?는|란)\s?질문(?:을|를)\s?[가-힣\s]{0,10}(?:던졌|했다|제기했)'
+            r'|^(?:(?:이|가|라)?는|란)\s?(?:답(?:변)?|발언|지적)(?:을|를)\s?[가-힣\s]{0,10}'
             r'(?:했다|한 것으로|밝혔|밝혀졌|드러났|전해졌)'
         )
         # 2026년 추가(편집인 제안, 복문 사례 분석): '"quote"는 [국민의힘 주진우 의원]의
@@ -501,14 +546,14 @@ class Stage1Extractor:
         # "는" 바로 뒤에 명사가 와야 매치되어 이 구조(질의/지적/질책 등)를 전부 놓쳤다.
         # 소유자가 지정발언자 본인이면(예: "quote"는 윤 장관의 답변에) 제외하지 않는다.
         POSSESSIVE_ATTRIBUTION_LOOKAHEAD_PAT = re.compile(
-            r'^(?:이|가|라)?는\s?((?:[가-힣]+\s){0,4}[가-힣]+)\s?의\s?'
+            r'^(?:(?:이|가|라)?는|란)\s?((?:[가-힣]+\s){0,4}[가-힣]+)\s?의\s?'
             r'(?:답(?:변)?|발언|질문|질의|물음|지적|질책|경고|비판|비난|주장|요구|언급|논평|설명)'
         )
         # 소유격 조사 "의"가 생략된 형태(예: "이해식 민주당 의원 질의에", "국민의힘 의원들 지적에").
         # "의"가 없으면 소유자 구문이 무엇이든 매치될 위험이 커지므로, 소유자 구문이 반드시
         # 직함(선택적으로 복수 '들')으로 끝나는 경우에만 인정한다.
         POSSESSIVE_NO_UI_LOOKAHEAD_PAT = re.compile(
-            r'^(?:이|가|라)?는\s?((?:[가-힣]+\s){0,4}[가-힣]+)\s'
+            r'^(?:(?:이|가|라)?는|란)\s?((?:[가-힣]+\s){0,4}[가-힣]+)\s'
             r'(?:답(?:변)?|발언|질문|질의|물음|지적|질책|경고|비판|비난|주장|요구|언급|논평|설명)'
             r'(?:에|엔|을|를|이|은|도)'
         )
@@ -518,7 +563,7 @@ class Stage1Extractor:
         # 수신술어는 활용형을 일일이 나열하지 않고 어간(받-, 듣-, 접-, 전달받- 등)으로 묶는다.
         _recv_noun_alt = '|'.join(sorted(RECEIVED_CONTENT_NOUNS, key=len, reverse=True))
         RECEIVE_ATTRIBUTION_LOOKAHEAD_PAT = re.compile(
-            r'^(?:이|가|라)?는\s?(?:(?:취지|내용)의\s)?(?:' + _recv_noun_alt + r')'
+            r'^(?:(?:이|가|라)?는|란)\s?(?:(?:취지|내용)의\s)?(?:' + _recv_noun_alt + r')'
             r'(?:을|를|이|가|도|까지|은|는)?\s?'
             r'(?:받(?:았|으|고|은|자|아|는|기|게)|듣(?:고|는|자|기)|들(?:었|으|은)|들어(?:왔|와|오)'
             r'|접(?:했|하|한|수)|샀|사며|당(?:했|하|한|해)|전달받|전해\s?(?:들|듣|받))'
@@ -901,6 +946,19 @@ class Stage1Extractor:
             # 전부 제외된 경우는 애매함이 없으므로 점검필요를 붙이지 않는다(사유만 조용히 기록).
             silent_reason = '제3자 발언으로 명확히 판정되어 전부 제외됨(점검불요)' if not removed_by_self_ref_filter \
                 else '인용문 안에 본인의 성/성명+직함이 3인칭으로 언급되어 본인 발언이 아닌 것으로 판정됨(점검불요)'
+            # 2026년 추가(편집인 제안, 권칠승 458그룹): 그런데 지정발언자 본인이 같은 문장의
+            # 주어(은/는/도)로 나오는데도 인용문이 전부 제외됐다면, 이는 '이 대표가 이송된 병원에서
+            # 기자들과 만나', '정 전 총리가 언급한 …질문에'처럼 수식절 속 제3자를 화자로 오인한
+            # 누락일 수 있다(실제로 이런 누락이 조용히 숨어 있었다). 조용히 넘기지 않고 점검필요로
+            # 표시한다. 본인 3인칭 언급(자기지시) 배제는 명확한 신호이므로 그대로 둔다.
+            if not removed_by_self_ref_filter:
+                _designated_as_topic = any(
+                    m.group(1) in ('은', '는', '도') and not _inside_any_quote(m.start())
+                    for pat in (self.FULLNAME_TITLE_PAT, self.SURNAME_TITLE_PAT)
+                    for m in pat.finditer(f_text)
+                )
+                if _designated_as_topic:
+                    reasons.append('!!본인이 주어로 나오는 문장인데 인용문이 전부 제3자 발언으로 제외됨 - 발췌누락 여부 확인 필요!!')
         # 2026년 추가(편집인 제안): "[제3자A]는 '~', [designated 또는 제3자B]는
         # '~'라고 했다"처럼, 서로 다른 이름(직함 포함)의 인물이 2명 이상 나오고
         # 각각 인용문이 붙어있는 구조는 화자 귀속이 자동판별로 불안정할 수 있으므로,
