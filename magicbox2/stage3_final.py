@@ -12,6 +12,7 @@
    긴 무관한 텍스트에 우연히 담기는 "체인 클러스터링" 오탐을 추가로 방지한다.
 """
 import re
+import difflib
 from datetime import datetime, timedelta
 from collections import Counter
 
@@ -40,6 +41,11 @@ def fuzzy_subset_ratio(short, long_):
 
 
 FUZZY_SUBSET_THRESHOLD = 0.80  # 일반 1:1 비교의 관련성 확인 기준
+# 2026년 확정(편집인): 같은 인용문(80% 이상 유사)끼리 누구를 남길지 정할 때, 공백·문장부호를 뺀
+# 글자수가 이만큼(5자) 이상 차이 나면 긴 쪽을 남긴다. 그보다 작은 차이는 띄어쓰기·표기 변형
+# 수준이라 동점으로 보고 다음 기준으로 넘긴다. 중요한 단어가 뒤쪽 20% 안에 있을 수 있어
+# 길이 기준을 아예 없애지는 않는다.
+LEN_RULE_N = 5
 SHORT_LEN = 8
 MIN_SUBSET_PORTION = 0.30  # 모집합 구성비 최소 기준 (실험적으로 조정 가능)
 # 2026년 정리(편집인 제안): A+B=C처럼 두 인용문을 인위적으로 합쳐서 비교하는
@@ -48,6 +54,10 @@ MIN_SUBSET_PORTION = 0.30  # 모집합 구성비 최소 기준 (실험적으로 
 AB_C_FUZZY_THRESHOLD = 0.85
 
 _PERIOD_SPLIT_PAT = re.compile(r'\.\s*')
+
+# 3단계가 '무엇을 왜 지웠는지' 남기는 기록(감사용). run_stage3_final 호출 때마다 비워진다.
+# 항목: (규칙, 남긴 그룹ID, 지운 그룹ID, 남긴 인용문, 지운 인용문)
+DEDUP_LOG = []
 
 
 def count_sentence_units(text, min_len=SHORT_LEN):
@@ -89,7 +99,7 @@ def _load_groups(rows, header):
                 active.append({'gid': gid, 'row_idx': row_idx, 'date': date,
                                 'quotes': quotes, 'alive': [True] * len(quotes),
                                 'orig_count': len(quotes),
-                                'sentence_count': sum(count_sentence_units(q) for q in quotes),
+                                'sentence_count': sum(count_sentence_units(q) for q in quotes),  # (순위에는 더 이상 쓰지 않음)
                                 'context': context, 'dead_group': False})
     active.sort(key=lambda g: (g['date'] or datetime(1900, 1, 1).date(), g['row_idx']))
     return active, idx
@@ -138,13 +148,141 @@ def _quote_match(ta, tb, ctx_a, ctx_b, threshold, context_min_sim):
     return True, True  # 부분집합 취급 -> 길이(포함) 우선순위
 
 
+# ---------------------------------------------------------------------------
+# a+b=c 병합 (편집인 요청, 2026년): 어떤 기자는 한 발언을 두 문장(두 인용문)으로 나누어 쓰고, 어떤
+# 기자는 한 인용문으로 길게 쓴다. 그대로 두면 짧은 두 인용문이 긴 한 인용문의 부분집합으로 먼저
+# 지워지고, 그룹 간 인용문 개수 비교도 어긋난다. 그래서 같은 그룹의 인접한 인용문 A, B가 다른
+# 그룹(±1일)의 인용문 C 하나에 대응하면, A+B를 한 단위로 보고 'C와 같은 인용문'으로 취급한다.
+#  - A, B 각각이 C에 85% 이상 포함(AB_C_FUZZY_THRESHOLD, 편집인 확정)
+#  - (A+B) 정규화 길이가 C의 85%~130% (130% 상한은 A와 B가 서로 중복인 경우를 거르는 안전장치)
+#  - C 안에서 A가 B보다 앞에 있어야 함(위치를 알 수 있을 때만 확인)
+# 합친 글은 비교에만 쓰고, 출력에는 원래의 A와 B를 그대로 내보낸다.
+# ---------------------------------------------------------------------------
+# A, B 각각이 C에 포함되는 비율의 기준. 편집인이 별도 도구 시절 85%로 확정했으나, 지금은 합친 글을
+# 출력하지 않고 비교에만 쓰므로(출력은 원래의 A, B 그대로) 오탐의 피해가 작다. 편집인이 지적한
+# 400/405(0.82), 596/601(0.81)이 85%에서는 탈락해 일반 유사도와 같은 80%로 조정했다.
+AB_C_CONTAIN = 0.80
+# 순서까지 보는 겹침 기준: A와 B 각각의 글자가 C 안에서 '순서대로' 대응되는 비율이 이 값 이상이어야 한다.
+# 글자 구성만 보는 80% 기준은 순서를 보지 않아, 서로 다른 말이 우연히 비슷한 글자로 이뤄진 경우를
+# 걸러내지 못한다(실제 오탐 2건이 0.27, 0.38이었고 정당한 병합은 모두 0.53 이상이었다).
+AB_C_ORDER_MIN = 0.50
+AB_C_MIN_RATIO = 0.85
+AB_C_MAX_RATIO = 1.30
+AB_C_LOG = []  # (그룹ID, A, B, C가 있는 그룹들, 길이비)
+
+
+def _alive_n(g):
+    """그룹에 지금 살아있는(앞 단계에서 지워지지 않은) 인용문 단위 수"""
+    return sum(1 for x in g['alive'] if x)
+
+
+def _ordered_cov(short, long_):
+    """짧은 글의 글자 중, 긴 글 안에서 순서대로(2자 이상 이어서) 대응되는 비율"""
+    sm = difflib.SequenceMatcher(None, short, long_, autojunk=False)
+    return sum(b.size for b in sm.get_matching_blocks() if b.size >= 2) / max(len(short), 1)
+
+
+def _abc_position_ok(nA, nB, nC):
+    ma = difflib.SequenceMatcher(None, nA, nC, autojunk=False).find_longest_match(0, len(nA), 0, len(nC))
+    mb = difflib.SequenceMatcher(None, nB, nC, autojunk=False).find_longest_match(0, len(nB), 0, len(nC))
+    if ma.size >= 5 and mb.size >= 5 and ma.b > mb.b:
+        return False
+    return True
+
+
+def _apply_abc_merges(active, forced, context_min_sim):
+    def ctx_ok(cx, cy):
+        a, b = normalize_keep_order(cx), normalize_keep_order(cy)
+        if not a or not b:
+            return True
+        return char_multiset_dice(a, b) >= context_min_sim
+
+    plans = {}
+    for gx in active:
+        if gx['date'] is None or len(gx['quotes']) < 2:
+            continue
+        qs = gx['quotes']
+        i = 0
+        while i + 1 < len(qs):
+            A, B = qs[i], qs[i + 1]
+            nA, nB = normalize_keep_order(A), normalize_keep_order(B)
+            hits = []
+            if len(nA) > SHORT_LEN and len(nB) > SHORT_LEN:
+                for gy in active:
+                    if gy is gx or gy['date'] is None:
+                        continue
+                    if abs((gy['date'] - gx['date']).days) > 1:
+                        continue
+                    for C in gy['quotes']:
+                        nC = normalize_keep_order(C)
+                        if len(nC) <= max(len(nA), len(nB)):
+                            continue
+                        ratio = (len(nA) + len(nB)) / len(nC)
+                        if not (AB_C_MIN_RATIO <= ratio <= AB_C_MAX_RATIO):
+                            continue
+                        if fuzzy_subset_ratio(nA, nC) < AB_C_CONTAIN or \
+                                fuzzy_subset_ratio(nB, nC) < AB_C_CONTAIN:
+                            continue
+                        if not ctx_ok(gx['context'], gy['context']):
+                            continue
+                        if not _abc_position_ok(nA, nB, nC):
+                            continue
+                        if _ordered_cov(nA, nC) < AB_C_ORDER_MIN or _ordered_cov(nB, nC) < AB_C_ORDER_MIN:
+                            continue
+                        hits.append((gy, C, ratio))
+            if hits:
+                plans.setdefault(gx['gid'], {})[i] = (A, B, hits)
+                i += 2
+            else:
+                i += 1
+
+    for gx in active:
+        pl = plans.get(gx['gid'])
+        if not pl:
+            continue
+        newq, newalive, merged_idx, notes = [], [], {}, []
+        i = 0
+        while i < len(gx['quotes']):
+            if i in pl:
+                A, B, hits = pl[i]
+                M = '"' + A.strip('"') + '. ' + B.strip('"') + '"'
+                merged_idx[len(newq)] = (A, B)
+                newq.append(M)
+                newalive.append(True)
+                for gy, C, ratio in hits:
+                    forced.add((M, C))
+                    forced.add((C, M))
+                gids = sorted({h[0]['gid'] for h in hits}, key=lambda x: int(x) if str(x).isdigit() else 0)
+                AB_C_LOG.append((gx['gid'], A, B, gids, max(h[2] for h in hits)))
+                notes.append(f"인접한 인용문 2개를 그룹 {', '.join(map(str, gids[:3]))}의 인용문 1개와 동일 취급")
+                i += 2
+            else:
+                newq.append(gx['quotes'][i])
+                newalive.append(gx['alive'][i])
+                i += 1
+        gx['quotes'], gx['alive'], gx['merged_idx'] = newq, newalive, merged_idx
+        gx['sentence_count'] = sum(count_sentence_units(q) for q in newq)
+        gx['abc_note'] = 'a+b=c 병합 적용: ' + '; '.join(notes)
+
+
 def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
                       min_subset_portion=MIN_SUBSET_PORTION):
     global MIN_SUBSET_PORTION
     MIN_SUBSET_PORTION = min_subset_portion
+    DEDUP_LOG.clear()
 
     active, idx = _load_groups(rows, header)
     h_i, gid_i, date_i, f_i = idx['인용문(발췌)'], idx['그룹ID'], idx['일자'], idx['발췌문장']
+
+    AB_C_LOG.clear()
+    forced = set()
+    _apply_abc_merges(active, forced, context_min_sim)
+
+    def match_fn(ta, tb, ctx_a, ctx_b, th, ms):
+        # a+b=c로 짝지어진 (합친 인용문, C)는 구성상 같은 인용문으로 본다(유사도 재검사 안 함)
+        if (ta, tb) in forced:
+            return True, False
+        return _quote_match(ta, tb, ctx_a, ctx_b, th, ms)
 
     def try_whole_group_match():
         """살아있는 그룹들을, '현재 살아있는 인용문 개수'로 다시 묶어서 완전
@@ -172,20 +310,41 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
                         break
                     used_b = set()
                     all_matched = True
+                    matched_pairs = []
                     for qa in qa_list:
                         found = False
                         for bi, qb in enumerate(qb_list):
                             if bi in used_b:
                                 continue
-                            hit, _ = _quote_match(qa, qb, ga['context'], gb['context'], threshold, context_min_sim)
-                            if hit:
+                            hit, _cont = match_fn(qa, qb, ga['context'], gb['context'], threshold, context_min_sim)
+                            # 통비교는 모든 쌍이 '동일급(구성비 80% 이상)'일 때만 성립한다. 일부 쌍이
+                            # 부분집합이면 그룹을 통째로 지우지 않고 1:1 비교로 넘긴다(긴 쪽이 남는다).
+                            if hit and not _cont:
                                 used_b.add(bi)
+                                matched_pairs.append((qa, qb))
                                 found = True
                                 break
                         if not found:
                             all_matched = False
                             break
                     if all_matched and len(used_b) == count:
+                        # 승자 결정: 쌍 중 어느 한쪽 인용문이 5자 이상 길면 그 인용문이 속한 그룹이
+                        # 날짜와 상관없이 남는다. 모두 5자 미만 차이면 위치(나중 그룹 존속).
+                        diffs = [len(normalize_keep_order(x)) - len(normalize_keep_order(y)) for x, y in matched_pairs]
+                        earlier_longer = any(d >= LEN_RULE_N for d in diffs)
+                        later_longer = any(d <= -LEN_RULE_N for d in diffs)
+                        if earlier_longer and later_longer:
+                            continue  # 쌍마다 긴 쪽이 엇갈림: 통비교 보류, 1:1 비교로 넘긴다
+                        if earlier_longer:
+                            DEDUP_LOG.append(('통비교: 5자 룰(앞선 그룹이 길어 앞선 그룹 존속)', ga['gid'], gb['gid'],
+                                              ' / '.join(qa_list), ' / '.join(qb_list), None, None))
+                            gb['dead_group'] = True
+                            gb['alive'] = [False] * len(gb['quotes'])
+                            continue
+                        DEDUP_LOG.append(('통비교: 5자 룰(나중 그룹이 길어 나중 그룹 존속)' if later_longer
+                                          else '통비교: 5자 미만 차이 → 위치(나중 그룹 존속)',
+                                          gb['gid'], ga['gid'],
+                                          ' / '.join(qb_list), ' / '.join(qa_list), None, None))
                         ga['dead_group'] = True
                         ga['alive'] = [False] * len(ga['quotes'])
                         break
@@ -204,16 +363,29 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
         return flat_
 
     def rank_wins(flat_, ia, ib, is_containment):
+        """반환: (승자, 패자, 규칙 이름).
+        부분집합(구성비 30~80%): 긴 쪽이 이긴다.
+        동일급(80% 이상): ① 공백제외 5자 이상 긴 쪽 → ② 그룹의 남은 인용문 수(병합 후)가 많은 쪽 → ③ 나중 것."""
         fa, fb = flat_[ia], flat_[ib]
         if is_containment:
             if len(fa['text']) >= len(fb['text']):
-                return ia, ib
-            return ib, ia
-
-        def key(k):
-            f = flat_[k]
-            return (-f['g']['sentence_count'], -len(f['text']), -f['g']['row_idx'])
-        return (ia, ib) if key(ia) < key(ib) else (ib, ia)
+                return ia, ib, '부분집합(긴 쪽 존속)'
+            return ib, ia, '부분집합(긴 쪽 존속)'
+        # 개수 = 그룹에 '남아 있는' 인용문 수(a+b=c 병합 후, 병합된 단위는 1개). 편집인 확정(2026년):
+        # ① 마침표든 쉼표든 어미로 이어졌든 한 발언은 같게 취급해야 하므로 문장 단위가 아니라 인용문
+        # 수로 센다(기자별로 쪼개 쓰거나 길게 쓰는 차이는 a+b=c 병합이 맞춰 준다). ② 통비교와 같이
+        # 앞 단계를 거친 뒤의 '남은' 수로 센다. 각 패스(부분집합 정리, 최종 1:1)가 시작될 때의 값이며,
+        # 패스 도중에는 바뀌지 않는다(처리 순서에 따라 결과가 달라지는 것을 막기 위함).
+        sa, sb = _alive_n(fa['g']), _alive_n(fb['g'])
+        la, lb = len(normalize_keep_order(fa['text'])), len(normalize_keep_order(fb['text']))
+        if abs(la - lb) >= LEN_RULE_N:
+            rule = '동일급: 5자 룰(긴 쪽)' + (' - 개수 우선을 뒤집음' if sa != sb and ((sa > sb) != (la > lb)) else '')
+            return (ia, ib, rule) if la > lb else (ib, ia, rule)
+        if sa != sb:
+            return (ia, ib, '동일급: 개수(남은 인용문 수) 우선') if sa > sb else (ib, ia, '동일급: 개수(남은 인용문 수) 우선')
+        if fa['g']['row_idx'] > fb['g']['row_idx']:
+            return ia, ib, '동일급: 위치(나중 것) 우선'
+        return ib, ia, '동일급: 위치(나중 것) 우선'
 
     def pairwise_pass(flat_, containment_only):
         """containment_only=True면 부분집합(포함관계) 매치만 처리하고 '동일
@@ -237,8 +409,8 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
                 ta, tb = flat_[i]['text'], flat_[j]['text']
                 na, nb = normalize_keep_order(ta), normalize_keep_order(tb)
                 short_a, short_b = len(na) <= SHORT_LEN, len(nb) <= SHORT_LEN
-                hit, is_containment = _quote_match(ta, tb, flat_[i]['g']['context'], flat_[j]['g']['context'],
-                                                    threshold, context_min_sim)
+                hit, is_containment = match_fn(ta, tb, flat_[i]['g']['context'], flat_[j]['g']['context'],
+                                               threshold, context_min_sim)
                 if not hit:
                     continue
                 if containment_only and not is_containment and not (na == nb):
@@ -251,9 +423,17 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
                     else:
                         loser = j if len(na) >= len(nb) else i
                         flat_[loser]['alive'] = False
+                    _l = i if not flat_[i]['alive'] else j
+                    _w = j if _l == i else i
+                    DEDUP_LOG.append(('짧은인용(8자이하)', flat_[_w]['g']['gid'], flat_[_l]['g']['gid'],
+                                      flat_[_w]['text'], flat_[_l]['text'], None, None))
                     continue
-                winner, loser = rank_wins(flat_, i, j, is_containment)
+                winner, loser, _rule = rank_wins(flat_, i, j, is_containment)
                 flat_[loser]['alive'] = False
+                _fw, _fl = flat_[winner], flat_[loser]
+                DEDUP_LOG.append((_rule, _fw['g']['gid'], _fl['g']['gid'], _fw['text'], _fl['text'],
+                                  (_alive_n(_fw['g']), len(normalize_keep_order(_fw['text'])), _fw['g']['row_idx']),
+                                  (_alive_n(_fl['g']), len(normalize_keep_order(_fl['text'])), _fl['g']['row_idx'])))
 
     def sync_alive(flat_):
         for f in flat_:
@@ -274,7 +454,8 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
     sync_alive(flat)
 
     total_orig = sum(g['orig_count'] for g in active)
-    total_surviving = sum(sum(1 for a in g['alive'] if a) for g in active if not g['dead_group'])
+    total_surviving = sum(sum((2 if k in g.get('merged_idx', {}) else 1) for k, a in enumerate(g['alive']) if a)
+                          for g in active if not g['dead_group'])
     removed_count = total_orig - total_surviving
 
     out_header = header[:]
@@ -284,12 +465,20 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
         gid = r[gid_i]
         g = gid_to_group.get(gid)
         if g is not None and g['row_idx'] == row_idx:
-            if g['dead_group']:
-                surviving = []
-            else:
-                surviving = [q for q, a in zip(g['quotes'], g['alive']) if a]
+            surviving = []
+            if not g['dead_group']:
+                for k, (q, a) in enumerate(zip(g['quotes'], g['alive'])):
+                    if not a:
+                        continue
+                    if k in g.get('merged_idx', {}):
+                        surviving.extend(g['merged_idx'][k])   # 합친 글이 아니라 원래의 두 인용문
+                    else:
+                        surviving.append(q)
             new_row = r[:]
             new_row[h_i] = '   '.join(surviving)
+            if g.get('abc_note') and '점검사유' in header:
+                ps_i = header.index('점검사유')
+                new_row[ps_i] = (new_row[ps_i] + '; ' if new_row[ps_i].strip() else '') + g['abc_note']
             out_rows.append(new_row)
         else:
             out_rows.append(r)
