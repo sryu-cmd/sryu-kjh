@@ -8,7 +8,7 @@
     kept_quotes, review_flag, review_note = ex.extract_row(f_text)
 """
 import re
-from title_master_list import TITLE_LIST, PARTY_NAMES, BARE_OTHER_WORDS, COMMON_SURNAMES, RECEIVED_CONTENT_NOUNS, SELF_ONLY_SHORT_TITLES
+from title_master_list import TITLE_LIST, PARTY_NAMES, BARE_OTHER_WORDS, COMMON_SURNAMES, SPACE_REQUIRED_SURNAMES, RECEIVED_CONTENT_NOUNS, SELF_ONLY_SHORT_TITLES
 
 QUOTE_PAT = re.compile(r'"[^"]*"|“[^”]*”')
 SINGLE_QUOTE_SPAN = re.compile(r'[\u2018\u2019\']')
@@ -89,11 +89,23 @@ PAREN_SPEAKER_PAT = re.compile(
 REVIEW_RATIO_THRESHOLD = 0.70
 
 
+# 2026년 추가(편집인 피드백, 김병주 351그룹): 정치인은 직함을 여럿 겸한다(의원이면서 최고위원, 간사, 위원,
+# 후보 등). 같은 기사에서 "김병주 최고위원"과 "김 의원"을 섞어 써도 같은 사람이므로, 이 직함들은
+# 서로 다른 사람의 증거로 보지 않는다. (장관·변호사·교수·검사·총리 등 겸직이 드문 직함은 제외)
+POLITICAL_TITLE_FAMILY = {
+    '의원', '최고위원', '위원', '위원장', '간사', '대표', '원내대표', '원내부대표', '부대표', '수석부대표',
+    '원내수석부대표', '원내정책수석부대표', '정책수석부대표', '정책위의장', '사무총장', '대변인', '수석대변인',
+    '부대변인', '의장', '부의장', '후보',
+}
+
+
 def _same_person_title(t, k):
     """두 직함이 같은 사람의 정식 호칭/약칭 관계인지.
     한쪽이 다른 쪽의 끝부분(3자 이상)이면 약칭 관계(수석대변인/대변인, 원내정책수석부대표/부대표).
     단 앞에 '부'(부대변인의 '부')가 붙는 경우는 다른 직책일 수 있어 제외. 앞 2자와 끝 3자가 같으면 변형."""
     if t == k:
+        return True
+    if t in POLITICAL_TITLE_FAMILY and k in POLITICAL_TITLE_FAMILY:
         return True
     a, b = (t, k) if len(t) <= len(k) else (k, t)
     if len(a) >= 3 and b.endswith(a) and not b[:len(b) - len(a)].endswith('부'):
@@ -102,6 +114,12 @@ def _same_person_title(t, k):
         return True
     return False
 
+
+# 기관·정당·정부·집단 이름이 인용문의 화자로 나오면(예: "대통령실은 '…'라고 했다", "민주당은 '…'라고 밝혔다") 지정발언자
+# 본인 발언으로 발췌하지 않는다. 지정발언자가 그 기관의 대변인이어도 이는 대개 그 기관의 공통 의견·공동성명이기 때문이다
+# (편집인 방침, 2026년). 이전에는 '본인 발언일 수 있어' 일단 발췌하고 점검필요를 붙였다.
+INSTITUTION_SPEAKER_WORDS = {'민주당', '더불어민주당', '국민의힘', '국힘', '야당', '여당', '여권',
+                             '범여권', '야권', '범야권', '측근', '일각', '가족', '대통령실'}
 
 # 동성 동호칭 신원 판정으로 '다른 사람'이 확정됐을 때 인용문을 자동으로 제외할지 여부.
 # 김병주 파일 검토(2026년)에서 정확도가 14행 중 6행(약 43%)에 그쳤다: 같은 기사에 지정발언자의
@@ -160,6 +178,9 @@ class Stage1Extractor:
         self.surname_ident_log = []   # (판정, 근거 풀네임, 성+직함 표현) 확인용 기록
         self._f_prefix = ''        # 지금 보는 구간(span) 앞쪽의 F열 텍스트
         self._article_title = ''   # 이 행 기사의 제목(본인 풀네임이 제목에 있으면 근거로 인정)
+        self._carry_other_name = ''  # 앞 문장의 마지막 화자가 다른 사람일 때 그 이름(연속 문장 판정용)
+        self._low_conf_words = []    # 기관·집단 명사(대통령실, 민주당 등) 화자로 보여 '언급vs화자 모호'가 된 단어들
+        self._inst_other_words = []  # 기관·집단 명사(대통령실, 민주당 등)가 화자로 나와 제외 판정된 단어들
         # 복합 직함(예: '당 대표 비서실장', '원내대표 비서실장')의 앞부분을 위한 선택적 삽입 허용
         title_prefix = r'(?:[가-힣]{1,4}(?=지사|시장|군수|교육감|구청장))?\s?'
         connector = (r'(?:\s?\([^)]{0,30}\))?'
@@ -203,8 +224,14 @@ class Stage1Extractor:
         # 지정발언자가 아닌 '다른 사람'의 성(1글자)+직함 (예: "조 장관은", "최 대표는") -
         # 흔한 한국 성씨 목록으로 한정해 오탐 위험을 낮춘다 (임의의 한 글자를 성으로 보지 않는다).
         common_surnames = [s for s in COMMON_SURNAMES if s != surname]
+        _free = [x for x in common_surnames if x not in SPACE_REQUIRED_SURNAMES]
+        _spaced = [x for x in common_surnames if x in SPACE_REQUIRED_SURNAMES]
+        _surname_alt = '(?:' + '|'.join(_free) + ')'
+        if _spaced:
+            # '부 의원은'처럼 반드시 띄어 쓴 경우만(붙여 쓴 '부대표는'을 '부+대표'로 읽지 않기 위해)
+            _surname_alt = '(?:' + '|'.join(_free) + r'|(?:' + '|'.join(_spaced) + r')(?=\s))'
         self.GENERIC_OTHER_SURNAME_PAT = re.compile(
-            r'(?<![가-힣])(' + '|'.join(common_surnames) + r')(?:\s?전)?\s?(?:' + title_pat + r')' + title_suffix + josa + end
+            r'(?<![가-힣])(' + _surname_alt + r')(?:\s?전)?\s?(?:' + title_pat + r')' + title_suffix + josa + end
         )
         # '전'(성씨)+직함 - 다만 '전'은 'ex-' 접두어로도 쓰이므로("김 전 원내대표"=
         # 김씨의 예전 원내대표), 앞에 다른 이름/성이 없을 때만("전 원내대표"처럼
@@ -365,8 +392,8 @@ class Stage1Extractor:
         # 문장에서 제3자가 '이/가'로 나오고 그 뒤에 이런 구조가 이어지면, 제3자는 수식절의
         # 주어일 뿐이고 인용문은 지정발언자의 것이다.
         REPORT_RELAY_AFTER_PAT = re.compile(
-            r'^(?:[가-힣\s0-9]{0,60}?)(?:기사|내용|글|보도|주장|발언|제보|메시지|인터뷰|점|것|사실|부분|대목|행태|행위|태도|처사|의혹)(?:을|를)?\s?'
-            r'(?:[가-힣]{0,10}\s?)?(?:공유하|인용하|소개하|전하|언급하|다루|게재하|게시하|올리|쓰|문제 삼|문제삼|비판하|비난하|지적하|꼬집|규탄하|반박하|거론하|강조하|우려하|겨냥하|질타하|힐난하)(?:으며|으면서|며|면서|고)'
+            r'^(?:[가-힣\s0-9]{0,60}?)(?:기사|내용|글|보도|주장|발언|제보|메시지|인터뷰|점|것|사실|부분|대목|행태|행위|태도|처사|의혹|사례|예|근거|증거|통계|수치|자료)(?:을|를)?\s?'
+            r'(?:[가-힣]{0,10}\s?)?(?:공유하|인용하|소개하|전하|언급하|다루|게재하|게시하|올리|쓰|문제 삼|문제삼|비판하|비난하|지적하|꼬집|규탄하|반박하|거론하|강조하|우려하|겨냥하|질타하|힐난하|들|내세우|꼽|제시하|빗대)(?:으며|으면서|며|면서|고)'
             r'|^(?:[가-힣\s0-9]{0,40}?)(?:지적|주장|비판|평가|설명)(?:하|했)(?:며|면서)'
         )
         # 안전장치: 이 규칙은 '지정발언자(은/는/도)'가 그 제3자보다 앞에 이미 나온 경우에만
@@ -383,6 +410,10 @@ class Stage1Extractor:
             r'|(?:기자들|취재진|기자단)(?:과|에게)\s*(?:만나서?|만난\s*자리에서|전화로)?'
             r'|(?:브리핑|기자회견|인터뷰|라디오|방송|간담회|토론회|청문회|회의|SNS|페이스북)(?:에서|에서는|에서도|에))\s*$'
         )
+
+        # 기관·집단 이름이 '이/가' 주어로 나온 뒤 문장이 '…[명사]를 "인용문"' 또는 '…하며 "인용문"'처럼 인용문 직전에
+        # 본인의 동작(목적어 조사나 -며/-면서)으로 끝나면, 그 기관은 소재(주어)일 뿐 인용문의 화자가 아니다.
+        INST_OBJECT_TAIL_PAT = re.compile(r'(?:[가-힣]{1,12}(?:을|를)|(?:으며|으면서|며|면서))\s*$')
 
         def _is_relay_subject(m):
             if not (_designated_topic_starts and min(_designated_topic_starts) < m.start()):
@@ -407,15 +438,24 @@ class Stage1Extractor:
                 rest = span[m.end():]
                 if ASK_VERB.search(rest):
                     continue
-            if word in LOW_CONFIDENCE_WORDS:
+            if word in INSTITUTION_SPEAKER_WORDS:
                 # 2026년 수정: 이 후보를 완전히 무시하지 않고 'low_review' 후보로
                 # candidates에 포함시킨다. 이전에는 앞쪽에 이미 다른(예: designated)
                 # 후보가 있으면 이 정당명 후보가 통째로 씹혀, "국민의힘은 '~'라며
                 # 사임계를 제출했다"처럼 정당명이 바로 인용문 앞(가장 강한 화자
                 # 신호)에 있는데도 무시되고 엉뚱하게 앞쪽 후보(지정발언자)가
                 # 이겨버리는 문제가 있었다.
-                bare_low_confidence.append(m.start())
-                candidates.append((m.start(), 'low_review', m.group(2)))
+                # 기관 이름이 '이/가' 주어이고, 본인(은/는/도)이 이미 앞에 나온 뒤 수식절 구조("국민의힘이 논평에서 …한 것을
+                # 소환하며 '…'", "이재명 대표의 측근이 … 상황을 '…'")로 이어지면, 그 기관은 다른 절의 주어일 뿐 화자가
+                # 아니다. 사람 이름 제3자에 쓰던 것과 같은 수식절 판정을 쓴다. ("대통령실은 …"처럼 은/는이 붙으면 별도
+                # 절의 화자로 계속 본다.)
+                if m.group(2) in ('이', '가') and (
+                        _is_relay_subject(m)
+                        or (_designated_topic_starts and min(_designated_topic_starts) < m.start()
+                            and INST_OBJECT_TAIL_PAT.search(span[m.end():]))):
+                    continue
+                self._inst_other_words.append(word)
+                candidates.append((m.start(), 'other', m.group(2)))
                 continue
             candidates.append((m.start(), 'other', m.group(2)))
         for m in self.SIDE_PAT.finditer(span):
@@ -529,6 +569,9 @@ class Stage1Extractor:
         F열은 그 뒤를 잘라낸 경우), E열(발췌문단)도 함께 확인해야 안전하다."""
         found = set()
         combined = f_text + '\n' + (e_text or '')
+        # 기사에 따라 복합 직함을 띄어 쓴다("수석 대변인", "원내 대표", "최고 위원"). 직함을 확인할 때만
+        # 이런 변형을 붙여서 본다(인용문 본문은 건드리지 않는다).
+        combined = re.sub(r'(수석|원내|정책수석|원내수석|최고)\s+(대변인|부대변인|부대표|대표|위원)', r'\1\2', combined)
         for title in TITLE_LIST:
             if re.search(re.escape(self.designated) + r'\s?(?:전\s)?' + re.escape(title)
                          + r'(?=[\s,.\"“”‘’은는이가도]|$)', combined):
@@ -604,11 +647,74 @@ class Stage1Extractor:
                     if not (_id and _id[0] == 'other'):
                         return True
                 return False
+            # 2026년 추가(편집인 피드백, 김병주 369그룹): E열 앞부분에 본인이 한 번이라도 나오면 이 행의 시작
+            # 화자를 본인으로 정했는데, 앞 문장의 '마지막 화자'가 다른 사람이면 "그러면서 '…'"처럼 앞 화자를
+            # 이어받는 문장은 그 사람의 발언이다. 앞 문단에서 마지막으로 인용문을 말한 사람이 누구인지 본다.
+            def _last_speaker_before_f(txt):
+                qspans = [(m.start(), m.end()) for m in QUOTE_PAT.finditer(txt)]
+                if not qspans:
+                    return None
+
+                def _in_quote(pos):
+                    return any(a <= pos < b for a, b in qspans)
+                d_pos = []
+                for _pat in (self.FULLNAME_TITLE_PAT, self.SURNAME_TITLE_PAT):
+                    for _m in _pat.finditer(txt):
+                        if _in_quote(_m.start()):
+                            continue
+                        if _pat is self.SURNAME_TITLE_PAT:
+                            _id = self._surname_identity(_m.group(0), txt[:_m.start()], include_e=False)
+                            if _id and _id[0] == 'other':
+                                continue
+                        d_pos.append(_m.start())
+                o_cands = []
+                for _m in self.ANY_NAME_TITLE_PAT.finditer(txt):
+                    _nm = _m.group(1)
+                    if _in_quote(_m.start()):
+                        continue
+                    if not (2 <= len(_nm) <= 4 and _nm[0] in COMMON_SURNAMES and _m.group(2) in ('은', '는', '이', '가')):
+                        continue
+                    if _nm == self.designated or _nm in self.designated or _nm in PARTY_NAMES \
+                            or _nm in COMPOUND_PREFIX_BLACKLIST or _nm in TITLE_LIST \
+                            or any(t in _nm for t in ('시장', '지사', '신문', '방송', '정부', '당선', '후보')):
+                        continue
+                    # 이 사람 바로 뒤(같은 문장 안)에서 인용문이 시작되어야 하고, 사이에 다른 큰따옴표가 없어야 한다
+                    _next_q = [(a, b) for a, b in qspans if a >= _m.end()]
+                    if not _next_q:
+                        continue
+                    _gap = txt[_m.end():_next_q[0][0]]
+                    if re.search(r'\n|다\.\s', _gap) or len(_gap) > 90:
+                        continue
+                    # 질문 속 인물(질문받는 쪽이 화자)이나 다른 사람 이름이 끼면 화자가 아니다
+                    if re.search(r'질문|물음|묻자|물었|라고\s?하자|고\s?하자', _gap):
+                        continue
+                    # 이 사람이 인용문의 화자가 되려면, 그 사람과 인용문 사이에 '~에 대해/~한 것에/~와 함께/~을 건의한'처럼
+                    # 이 사람이 다른 동작의 행위자·대상으로 쓰인 구문이 끼지 않아야 한다. 이름 바로 뒤가 인용문이거나
+                    # 장소·매체 정도만 낀 직접 인용 구조여야 한다(박형준 부산시장이 ~건의한 것에 대해 "…" = 화자는 다른 사람).
+                    if re.search(r'에\s?대해|대한|관련|한\s?것|건\s?것|된\s?것|것에|것을|와의|과의|과\s|와\s|에게|한테|함께|건의|만난|만나', _gap):
+                        continue
+                    o_cands.append((_m.start(), 'other', _nm))
+                if not o_cands:
+                    return None
+                last_o = max(o_cands, key=lambda c: c[0])
+                # 본인이 그 사람보다 뒤에 나오면 본인이 마지막 화자 -> 이 규칙을 쓰지 않는다
+                if d_pos and max(d_pos) > last_o[0]:
+                    return None
+                return last_o
             if (self.FULLNAME_TITLE_PAT.search(e_before_f) or _surname_designated_in(e_before_f)) \
                     and '"' in e_before_f:
-                initial_state = 'designated'
-                current_state = 'designated'
-                e_confirmed_designated = True
+                _last = _last_speaker_before_f(e_before_f)
+                _f_has_own_subject = bool(self.FULLNAME_TITLE_PAT.search(f_text)) or \
+                    any(_m.group(1) in ('은', '는', '도', '이', '가') for _m in self.SURNAME_TITLE_PAT.finditer(f_text)) or \
+                    bool(self.ANY_NAME_TITLE_PAT.search(f_text[:f_text.find('"')] if '"' in f_text else f_text))
+                if _last and _last[1] == 'other' and not _f_has_own_subject:
+                    # 앞 문장의 마지막 화자가 다른 사람: 시작 상태를 그 사람으로 둔다(연속 문장은 그 사람 발언)
+                    current_state = 'other'
+                    self._carry_other_name = _last[2]
+                else:
+                    initial_state = 'designated'
+                    current_state = 'designated'
+                    e_confirmed_designated = True
 
         QUESTION_LOOKAHEAD_PAT = re.compile(r'^(?:(?:이|가|라)?는|란)\s?(?:질문|질의|물음)(?:에|엔)|^(?:다|냐|나|가)는\s?(?:질문|질의|물음)(?:에|엔)')
         # 지정발언자가 질문자이고, 인용문이 그 질문에 대한 제3자의 답변인 경우
@@ -925,6 +1031,39 @@ class Stage1Extractor:
                     expected[i] = True
         return actual == expected
 
+    def _coordinate_clauses_ok(self, f_text, kept):
+        """이은 대등절 판정(편집인 피드백, 김병주): "A는 '…'고 했고, B는 '…'고 했다"처럼 각 인용문의 화자가 같은 절 안에
+        풀네임(+직함)으로 명시된 문장이면, 다른 사람 발언을 뺀 것이 명백하므로 점검 대상에서 뺀다.
+        조건: ① 인용문이 2개 이상, ② 모든 인용문의 앞 구간(직전 인용문 끝~이 인용문 시작)에 풀네임 화자가 있다,
+        ③ 그 화자가 본인이면 발췌, 다른 사람이면 제외한 결과가 실제 발췌 결과와 같다."""
+        qms = list(QUOTE_PAT.finditer(f_text))
+        if len(qms) < 2:
+            return False
+        qspans = [(m.start(), m.end()) for m in qms]
+        speakers = []   # 각 인용문의 화자 종류
+        prev_end = 0
+        for (a, b) in qspans:
+            seg_start, seg = prev_end, f_text[prev_end:a]
+            cands = []
+            for m in self.FULLNAME_TITLE_PAT.finditer(seg):
+                cands.append((m.start(), 'designated'))
+            for m in self.ANY_NAME_TITLE_PAT.finditer(seg):
+                nm = m.group(1)
+                if 2 <= len(nm) <= 4 and nm[0] in COMMON_SURNAMES and nm != self.designated \
+                        and nm not in self.designated and nm not in PARTY_NAMES and nm not in TITLE_LIST \
+                        and nm not in COMPOUND_PREFIX_BLACKLIST:
+                    cands.append((m.start(), 'other'))
+            # 기관·정당·정부 이름도 그 절의 화자로 인정한다("대통령실은 이에 대해 '…'라고 했다")
+            for m in self.BARE_OTHER_PAT.finditer(seg):
+                if m.group(1) in INSTITUTION_SPEAKER_WORDS:
+                    cands.append((m.start(), 'other'))
+            if not cands:
+                return False
+            speakers.append(max(cands, key=lambda c: c[0])[1])
+            prev_end = b
+        expected = [q.group(0) for q, sp in zip(qms, speakers) if sp == 'designated']
+        return expected == list(kept)
+
     def extract_row(self, f_text, is_article_first=False, e_text='', article_context='', article_title=''):
         """전체 1단계 파이프라인: 발췌 -> 타인발언제외 -> 소유격/제목필터.
         반환: (최종 인용문 리스트, 점검필요 여부, 점검사유)
@@ -938,6 +1077,9 @@ class Stage1Extractor:
         # 같은 기사(동일 일자·신문사·제목)의 앞 행들의 발췌문단: 동성 동호칭 신원 판정에 쓴다
         self._article_ctx = (article_context or '')[-8000:]
         self._article_title = article_title or ''
+        self._carry_other_name = ''
+        self._low_conf_words = []
+        self._inst_other_words = []
         self.surname_ident_log.clear()
         orig_quotes = QUOTE_PAT.findall(f_text)
         quotes_after_speaker_filter, low_review, raw_kinds = self._filter_third_party(f_text, is_article_first, e_text)
@@ -1006,7 +1148,11 @@ class Stage1Extractor:
             auto_excl_reason = f'인용문 {len(orig_quotes)}개 중 {len(orig_quotes)-len(kept)}개 자동제외됨'
             reasons.append(auto_excl_reason)
         if low_review:
-            reasons.append('언급vs화자 모호(측근/정당 등 비발언 서술 가능성)')
+            # 어느 인용문이 어떤 말(대통령실·민주당·측근 등) 때문에 불확실한지 알 수 있게 쓴다
+            _lw = ', '.join(dict.fromkeys(self._low_conf_words)) or '기관·정당·측근'
+            _qs = ' / '.join('"' + q.strip('"')[:12] + '…"' for q in low_review[:2])
+            reasons.append(f'언급vs화자 모호: 인용문 {_qs}의 화자가 "{_lw}"(기관·정당·측근 등)라 '
+                           f'지정발언자 본인 발언인지 불분명하여 일단 발췌함 - 타인(기관) 발언이면 삭제')
         if notes:
             reasons.append(notes)
         if _likely_other and kept:
@@ -1044,6 +1190,9 @@ class Stage1Extractor:
                     distinct_names.add(name)
         _resolved_other = sorted({nm for kind, nm, _mt in self.surname_ident_log if kind == 'other'})
         distinct_names.update(_resolved_other)
+        if self._carry_other_name:
+            distinct_names.add(self._carry_other_name)
+        distinct_names.update(self._inst_other_words)
         if self.NAME_SSI_OTHER_PAT.search(f_text):
             distinct_names.add(self.designated + '씨')
         if self.NAME_OFFICE_OTHER_PAT.search(f_text):
@@ -1095,6 +1244,10 @@ class Stage1Extractor:
         # 기대 결과와 일치하면 점검필요 표시는 생략하되, 점검사유 칸에 흔적을 남긴다.
         if auto_excl_reason and reasons == [auto_excl_reason] and self._crosscheck_agrees(f_text, kept):
             return kept, '', f'교차확인 통과(조사 형식 일치) - {auto_excl_reason}'
+        # 이은 대등절: 각 인용문의 화자가 같은 절에 풀네임으로 명시된 경우(복수 화자 표시·자동제외 표시를 모두 면제)
+        _only_structural = all(r_ == auto_excl_reason or r_.startswith('!!복수 화자 구조') for r_ in reasons) if reasons else False
+        if auto_excl_reason and _only_structural and self._coordinate_clauses_ok(f_text, kept):
+            return kept, '', f'이은 대등절(각 인용문의 화자가 같은 절에 명시됨) - {auto_excl_reason}(점검 불요)'
 
         point_check = '점검필요' if reasons else ''
         final_notes = '; '.join(reasons) if reasons else (locals().get('silent_reason') or '')
