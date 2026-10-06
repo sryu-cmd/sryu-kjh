@@ -461,6 +461,75 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
     out_header = header[:]
     out_rows = [out_header]
     gid_to_group = {g['gid']: g for g in active}
+
+    # 편집인 방침(김병주 피드백): 불확실한 것은 일단 발췌해 두고, 중복제거로 사라진 그룹은 4단계에서 점검할 필요가 없다.
+    # 그래서 인용문이 전부 사라진 그룹은 점검필요를 해소하고(원래 사유는 남김), 일부만 사라진 그룹은 점검필요는 건드리지
+    # 않고 '무엇이 어느 그룹에 흡수되어 사라졌는지'만 점검사유에 적는다(누락인지 중복제거인지 구분하기 위함).
+    lost_by = {}
+    for _rule, _w, _l, _wt, _lt, _kw, _kl in DEDUP_LOG:
+        lost_by.setdefault(_l, []).append((_w, _lt))
+    pc_col = header.index('점검필요') if '점검필요' in header else None
+    ps_col = header.index('점검사유') if '점검사유' in header else None
+
+    # 점검 인계(편집인 아이디어, 2026년): 같은 발언이 '점검 불필요(표시 없음)' 그룹과 '점검필요' 그룹에 겹쳐 있어 우선순위로
+    # 불필요 쪽이 지워지고 점검필요 쪽이 남았다면, 남은 쪽이 지워진 쪽의 '점검 불필요' 자격을 이어받는다. 같은 발언이 이미
+    # 다른 기사에서 본인 발언으로 확실히 확인됐기 때문이다. 단 ① 신원 계열 표시(성+직함이 본인인지 불분명)만 인계하고
+    # (복문 표시는 다른 인용문의 문제), ② 남은 그룹의 모든 인용문이 확인된 경우에만 해소하며, ③ 지워진 쪽이 표시 없는
+    # 그룹일 때만 근거로 쓴다(지워진 쪽도 불확실했다면 근거가 못 된다).
+    confirmed_texts, confirmers = {}, {}
+    if pc_col is not None:
+        for _rule, _w, _l, _wt, _lt, _kw, _kl in DEDUP_LOG:
+            if _rule.startswith('짧은인용') or _w == _l:
+                continue
+            _lg = gid_to_group.get(_l)
+            if _lg is None or rows[_lg['row_idx']][pc_col]:
+                continue
+            confirmed_texts.setdefault(_w, set()).add('*' if _rule.startswith('통비교') else _wt)
+            if _l not in confirmers.setdefault(_w, []):
+                confirmers[_w].append(_l)
+    ID_PHRASES = ('성+직함이 같은 기사에 먼저 나온 다른 사람', '같은 기사에 같은 성의 다른 사람', '본인 풀네임을 확인할 수 없음')
+    NONFLAG_STARTS = ('교차확인 통과', '이은 대등절', '제3자 발언으로 명확히', '중복제거됨', '일부 중복제거됨', 'a+b=c')
+
+    def _identity_only(reason_text):
+        flagged_any = False
+        for seg in reason_text.split(' | '):
+            seg = seg.strip()
+            if not seg or seg.startswith(NONFLAG_STARTS):
+                continue
+            for sub in seg.split('; '):
+                sub = sub.strip()
+                if not sub or sub.startswith(NONFLAG_STARTS):
+                    continue
+                flagged_any = True
+                if not any(ph in sub for ph in ID_PHRASES):
+                    return False
+        return flagged_any
+    inherited_groups = set()
+
+    def _dedup_note(g, surviving):
+        entries = lost_by.get(g['gid'], [])
+        if not entries or ps_col is None:
+            return None, False
+        winners = []
+        for w, _t in entries:
+            if w not in winners:
+                winners.append(w)
+        wtxt = ', '.join(winners[:3]) + (' 등' if len(winners) > 3 else '')
+        if not surviving:
+            return f'중복제거됨: 인용문이 전부 제거되어 그룹 {wtxt}에 존속', True
+        shown = []
+        for _w, t in entries:
+            first = t.split(' / ')[0].strip('"')
+            shown.append('"' + first[:14] + '…"')
+        return f'일부 중복제거됨: 인용문 {len(entries)}개가 제거되어 그룹 {wtxt}에 존속 ' + ', '.join(shown[:2]), False
+
+    # 인용문이 전부 사라진 그룹의 id (그 그룹 모든 행의 점검필요를 해소하기 위함)
+    fully_removed = set()
+    for g in active:
+        sv = [] if g['dead_group'] else [q for q, a in zip(g['quotes'], g['alive']) if a]
+        if not sv and g['gid'] in lost_by:
+            fully_removed.add(g['gid'])
+
     for row_idx, r in enumerate(rows):
         gid = r[gid_i]
         g = gid_to_group.get(gid)
@@ -479,8 +548,31 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
             if g.get('abc_note') and '점검사유' in header:
                 ps_i = header.index('점검사유')
                 new_row[ps_i] = (new_row[ps_i] + '; ' if new_row[ps_i].strip() else '') + g['abc_note']
+            if pc_col is not None and ps_col is not None and surviving and r[pc_col] == '점검필요' \
+                    and g['gid'] in confirmed_texts and _identity_only(r[ps_col]):
+                _ct = confirmed_texts[g['gid']]
+                _units = [q for q, a in zip(g['quotes'], g['alive']) if a]
+                if '*' in _ct or all(u in _ct for u in _units):
+                    _ids = ', '.join(confirmers[g['gid']][:3])
+                    new_row[pc_col] = ''
+                    new_row[ps_col] = (f'중복 확인으로 해소: 같은 발언이 그룹 {_ids}에서 본인 발언으로 확인됨'
+                                       f' | 원래 사유: {r[ps_col].strip()}')
+                    inherited_groups.add(g['gid'])
+            note, cleared = _dedup_note(g, surviving)
+            if note is not None:
+                orig_reason = new_row[ps_col].strip()
+                new_row[ps_col] = note + (f' | 원래 사유: {orig_reason}' if (cleared and orig_reason) else
+                                          (f'; {orig_reason}' if orig_reason else ''))
+                if cleared and pc_col is not None:
+                    new_row[pc_col] = '중복제거됨'
             out_rows.append(new_row)
         else:
+            if gid in inherited_groups and pc_col is not None:
+                r = r[:]
+                r[pc_col] = ''
+            if gid in fully_removed and pc_col is not None:
+                r = r[:]
+                r[pc_col] = '중복제거됨'
             out_rows.append(r)
 
     return out_rows, removed_count
