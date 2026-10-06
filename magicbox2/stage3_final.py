@@ -84,6 +84,8 @@ def _load_groups(rows, header):
     active = []
     for row_idx, r in enumerate(rows):
         gid = r[gid_i]
+        if not str(gid).isdigit():
+            continue   # 의견 기사(그룹ID가 '사설' 등): 병합·중복제거 열외, 원본 그대로 출력된다
         if gid not in seen_gid:
             seen_gid[gid] = row_idx
             h = r[h_i]
