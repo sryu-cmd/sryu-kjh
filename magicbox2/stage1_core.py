@@ -284,6 +284,21 @@ class Stage1Extractor:
             r'(?:표현했다|말했다|불렀다|얘기했다|말한다|평가했다|규정했다|묘사했다|지칭했다|이야기했다|밝히|말하)'
         )
 
+    def _self_ref_hit(self, q):
+        """인용문 안의 [지정발언자 성명+호칭] 검색. 기자가 덧붙인 소괄호 설명은 인용문 내용이 아니므로 제외한다."""
+        t = re.sub(r'\([^)]*\)', '', self._mask_single_quoted(q))
+        return self.SELF_REFERENCE_PAT.search(t)
+
+    def _self_ref_excluded(self, q):
+        """자기지시 자동제외 여부. '후보' 호칭은 본인이 과거 호칭을 인용해 말하는 경우가 있어 제외하지 않고
+        점검필요로 표시한다(편집인 방침, 2026년)."""
+        m = self._self_ref_hit(q)
+        return bool(m) and '후보' not in m.group(0)
+
+    def _self_ref_candidate(self, q):
+        m = self._self_ref_hit(q)
+        return bool(m) and '후보' in m.group(0)
+
     def _mask_single_quoted(self, span):
         marks = [m.start() for m in SINGLE_QUOTE_SPAN.finditer(span)]
         if len(marks) < 2:
@@ -346,8 +361,29 @@ class Stage1Extractor:
             fm = follow.match(ctx[nm.end(): nm.end() + 40])
             if fm and bool(fm.group('former')) == want_former:
                 names.append(name)
+        # 기사 제목에 같은 성의 다른 사람 풀네임이 있고 지정발언자는 제목에 없으면, 제목의 그 사람일 수 있다
+        # (김남국 파일 149/150그룹: 제목은 김영진 의원, 본문 목록에만 김남국). 제목에는 직함이 안 붙는 경우가 많아
+        # 직함 호환 검사는 하지 않고 표시만 한다(제외하지 않음).
+        title_others = []
+        if self._article_title and self.designated not in self._article_title:
+            for nm in self.PRIOR_NAME_PAT.finditer(self._article_title):
+                name = nm.group(1)
+                if name[:2] in self._not_names or name in PARTY_NAMES or name in TITLE_LIST or name == self.designated:
+                    continue
+                # 이름으로 쓰인 것만 인정: 바로 뒤가 호칭·정당명이거나 따옴표·가운뎃점·쉼표·소괄호·문장 끝일 때
+                # ('이게', '이렇게', '이대남'처럼 이름이 아닌 낱말이 성으로 시작하는 경우를 거른다)
+                _after = self._article_title[nm.end(): nm.end() + 12]
+                _before = self._article_title[max(0, nm.start() - 1): nm.start()]
+                if _before and _before in '\'\u2018"\u201c' and _after[:1] and _after[:1] in '\'\u2019"\u201d':
+                    continue   # 따옴표로 묶인 낱말('이대남')
+                if not (re.match(r'\s?(?:(?:' + self._party_alt + r')\s)?(?:전\s)?(?:' + '|'.join(sorted(set(TITLE_LIST), key=len, reverse=True)) + r')', _after)
+                        or re.match(r'\s?["\u201c\u2018\'\u00b7\u2022\u2219,(]', _after)):
+                    continue
+                title_others.append(name)
         if not names:
-            return None
+            return ('likely_other', title_others[0]) if title_others else None
+        if title_others and all(n == self.designated for n in names):
+            return ('ambiguous', title_others[0])
         others = [n for n in names if n != self.designated]
         if not others:
             return ('designated', self.designated)
@@ -456,6 +492,10 @@ class Stage1Extractor:
                     continue
                 self._inst_other_words.append(word)
                 candidates.append((m.start(), 'other', m.group(2)))
+                continue
+            # 기관 사전에 없는 일반 주체('검찰이' 등)도 같은 수식절 판정을 쓴다: "김 의원은 검찰이 가족 접견을 막은 것도
+            # 언급하며 '…'"에서 검찰은 화자가 아니다(김남국 53그룹).
+            if m.group(2) in ('이', '가') and _is_relay_subject(m):
                 continue
             candidates.append((m.start(), 'other', m.group(2)))
         for m in self.SIDE_PAT.finditer(span):
@@ -613,7 +653,7 @@ class Stage1Extractor:
         # 단, 호칭 없이 '성명'만 있는 경우는 이 규칙에서 제외한다(본인이 자기 이름만 언급하는 경우는 흔함).
         self_ref_quotes = set()
         for q in quotes:
-            if self.SELF_REFERENCE_PAT.search(self._mask_single_quoted(q)):
+            if self._self_ref_excluded(q):
                 self_ref_quotes.add(q)
 
         # 2026년 규칙 변경(편집인 제안): '인용문이 1개뿐이면 화자 판별 없이 무조건
@@ -1139,7 +1179,7 @@ class Stage1Extractor:
         # 레이블/제목형 필터로 제외된 인용문이 있었는지 확인한다 - 있었다면 그건
         # 애매함이 아니라 명확한 판정이다.
         removed_by_self_ref_filter = any(
-            self.SELF_REFERENCE_PAT.search(self._mask_single_quoted(q)) for q in orig_quotes
+            self._self_ref_hit(q) for q in orig_quotes
         ) or any(_is_label_not_speech(q) or _is_headline_quote(q) for q in orig_quotes)
 
         reasons = []
@@ -1164,6 +1204,10 @@ class Stage1Extractor:
         elif _no_evidence and kept:
             reasons.append('!!성+직함("' + _no_evidence[0].strip()[:8] + '")만으로 본인을 지칭했고, 같은 기사(앞 문단·제목)에서 '
                            '본인 풀네임을 확인할 수 없음 - 본인 발언인지 확인 필요!!')
+        _selfref_cand = [q for q in kept if self._self_ref_candidate(q)]
+        if _selfref_cand:
+            reasons.append('!!인용문 안에 본인 성명+"후보" 호칭이 있음("' + _selfref_cand[0].strip('"')[:14]
+                           + '…") - 본인이 과거 호칭을 인용한 발언인지, 타인이 본인을 부른 말인지 확인 필요!!')
         if self.TEMP_ABBREV_PAT is not None and self.TEMP_ABBREV_PAT.search(f_text):
             reasons.append('!!임시 약칭 사용됨 - 동성이칭(같은 성+같은 약칭의 다른 사람) 여부 확인 필요!!')
         if ambiguous_boundary_excluded:
