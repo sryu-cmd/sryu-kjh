@@ -508,6 +508,69 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
         return flagged_any
     inherited_groups = set()
 
+    # 교차기사 신원 확인(김남국 53그룹 사례, 2026년): 이 그룹에는 본인 풀네임이 없어 신원이 불분명하지만, 같은 발언이 다른 기사의
+    # 발췌문단에 있고 그 기사에서는 인용문 앞쪽에 본인 풀네임이 나온다면(그 사이에 같은 성의 다른 사람 호칭이 없을 때) 본인 발언으로 확인된 것이다.
+    # 그 다른 기사는 중복제거로 지워졌거나 아직 남아 있어도 된다(문단 자체가 증거). 신원 계열 표시만 해소하고 모든 인용문이 확인돼야 한다.
+    _nm_i = idx.get('이름'); _para_i = idx.get('발췌문단'); _news_i = idx.get('신문사'); _title_i = idx.get('제목')
+    xconfirm = {}
+    if pc_col is not None and _nm_i is not None and _para_i is not None and rows:
+        _designated = rows[0][_nm_i].strip()
+        _sur = _designated[:1]
+        from title_master_list import TITLE_LIST as _TL
+        _tl = '|'.join(sorted(set(_TL), key=len, reverse=True))
+        _other_name_title = re.compile(r'(?<![가-힣])([가-힣]{2,4})\s?(?:전\s)?(?:' + _tl + r')')
+
+        def _nfold(txt):
+            chars, pos = [], []
+            for k, ch in enumerate(txt):
+                if ch in ' \t\r\n.,!?"\u2018\u2019\u201c\u201d\'' :
+                    continue
+                chars.append(ch); pos.append(k)
+            return ''.join(chars), pos
+        _folded = []   # (기사키, 원문단, 접힌 문단, 위치맵)
+        for r in rows:
+            if r[_para_i].strip():
+                fx, ps = _nfold(r[_para_i])
+                _folded.append(((r[date_i], r[_news_i] if _news_i is not None else '', r[_title_i] if _title_i is not None else ''), r[_para_i], fx, ps))
+
+        def _confirm_unit(unit, own_key):
+            u, _ = _nfold(unit.strip('"'))
+            u = u[:30]
+            if len(u) < 12:
+                return None
+            for key, raw, fx, ps in _folded:
+                if key == own_key:
+                    continue
+                at = fx.find(u)
+                if at < 0:
+                    continue
+                qpos = ps[at]
+                before = raw[:qpos]
+                npos = before.rfind(_designated)
+                if npos < 0:
+                    continue
+                between = before[npos + len(_designated):]
+                if len(between) > 400:
+                    continue
+                if any(m.group(1) != _designated for m in _other_name_title.finditer(between)):
+                    continue
+                return key
+            return None
+
+        for g in active:
+            if g['dead_group']:
+                continue
+            r0 = rows[g['row_idx']]
+            if r0[pc_col] != '점검필요' or ps_col is None or not _identity_only(r0[ps_col]):
+                continue
+            units = [q for q, a in zip(g['quotes'], g['alive']) if a]
+            if not units:
+                continue
+            own_key = (r0[date_i], r0[_news_i] if _news_i is not None else '', r0[_title_i] if _title_i is not None else '')
+            srcs = [_confirm_unit(u, own_key) for u in units]
+            if all(srcs):
+                xconfirm[g['gid']] = srcs[0]
+
     def _dedup_note(g, surviving):
         entries = lost_by.get(g['gid'], [])
         if not entries or ps_col is None:
@@ -560,6 +623,13 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
                     new_row[ps_col] = (f'중복 확인으로 해소: 같은 발언이 그룹 {_ids}에서 본인 발언으로 확인됨'
                                        f' | 원래 사유: {r[ps_col].strip()}')
                     inherited_groups.add(g['gid'])
+            if pc_col is not None and ps_col is not None and surviving and r[pc_col] == '점검필요' \
+                    and g['gid'] in xconfirm and g['gid'] not in inherited_groups:
+                _k = xconfirm[g['gid']]
+                new_row[pc_col] = ''
+                new_row[ps_col] = (f'다른 기사로 해소: 같은 발언이 다른 기사({_k[1]} {_k[0]} "{_k[2][:18]}…")에서 '
+                                   f'본인 풀네임 뒤에 이어지는 발언으로 확인됨 | 원래 사유: {r[ps_col].strip()}')
+                inherited_groups.add(g['gid'])
             note, cleared = _dedup_note(g, surviving)
             if note is not None:
                 orig_reason = new_row[ps_col].strip()
