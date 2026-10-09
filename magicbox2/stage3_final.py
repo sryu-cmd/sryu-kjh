@@ -40,6 +40,33 @@ def fuzzy_subset_ratio(short, long_):
     return overlap / len(short)
 
 
+# 2026년 확정(편집인 지적, 그룹 184): 글자 구성 유사도는 순서를 보지 않아 긴 문장끼리는 부풀려진다.
+# 그래서 짧은 쪽 안에 모집합과 대응되지 않는 연속 구간이 UNMATCHED_RUN_MAX자 이상이면(=모집합에 없는
+# 구절이 들어 있으면) 부분집합으로 인정하지 않는다. 단, 글자 구성 유사도가 FUZZY_HIGH(0.90) 이상이면
+# 표현만 다른 같은 발언으로 보고 이 검사를 면제한다.
+UNMATCHED_RUN_MAX = 8
+FUZZY_HIGH = 0.90
+# 짧은 인용문이 모집합에 글자 그대로 들어 있고 이 길이 이상이면 모집합 구성비 하한(30%)을 면제한다.
+EXACT_CONTAIN_MIN = 12
+
+
+def _longest_unmatched_run(short, long_):
+    """short에서 long_과 순서대로 대응(2자 이상 공통 블록)되지 않는 가장 긴 연속 글자 수."""
+    from difflib import SequenceMatcher
+    if not short:
+        return 0
+    covered = [False] * len(short)
+    for blk in SequenceMatcher(None, short, long_, autojunk=False).get_matching_blocks():
+        if blk.size >= 2:
+            for i in range(blk.a, blk.a + blk.size):
+                covered[i] = True
+    best = cur = 0
+    for c in covered:
+        cur = 0 if c else cur + 1
+        best = max(best, cur)
+    return best
+
+
 FUZZY_SUBSET_THRESHOLD = 0.80  # 일반 1:1 비교의 관련성 확인 기준
 # 2026년 확정(편집인): 같은 인용문(80% 이상 유사)끼리 누구를 남길지 정할 때, 공백·문장부호를 뺀
 # 글자수가 이만큼(5자) 이상 차이 나면 긴 쪽을 남긴다. 그보다 작은 차이는 띄어쓰기·표기 변형
@@ -134,7 +161,9 @@ def _quote_match(ta, tb, ctx_a, ctx_b, threshold, context_min_sim):
     else:
         r1 = fuzzy_subset_ratio(na, nb)
         r2 = fuzzy_subset_ratio(nb, na)
-        if r1 >= FUZZY_SUBSET_THRESHOLD or r2 >= FUZZY_SUBSET_THRESHOLD:
+        if r1 >= FUZZY_SUBSET_THRESHOLD and (r1 >= FUZZY_HIGH or _longest_unmatched_run(na, nb) < UNMATCHED_RUN_MAX):
+            is_related = True
+        elif r2 >= FUZZY_SUBSET_THRESHOLD and (r2 >= FUZZY_HIGH or _longest_unmatched_run(nb, na) < UNMATCHED_RUN_MAX):
             is_related = True
     if not is_related:
         return False, False
@@ -143,7 +172,8 @@ def _quote_match(ta, tb, ctx_a, ctx_b, threshold, context_min_sim):
     shorter_len = min(len(na), len(nb))
     longer_len = max(len(na), len(nb))
     portion = shorter_len / longer_len if longer_len else 0
-    if portion < MIN_SUBSET_PORTION:
+    exact_contain = (na in nb or nb in na) and shorter_len >= EXACT_CONTAIN_MIN
+    if portion < MIN_SUBSET_PORTION and not exact_contain:
         return False, False
     if portion >= threshold:
         return True, False  # 동일 인용문 취급 -> 개수 우선순위
