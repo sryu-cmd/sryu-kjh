@@ -128,7 +128,7 @@ temp_abbrev_input = st.text_input(
          "문제없다고 확인되면 전문편집인에게 알려 영구 등록하세요."
 )
 uploaded = st.file_uploader(
-    "입력 CSV 파일 (이름, URL, 신문사, 제목, 발췌문단, 발췌문장, 일자 열 포함)", type="csv"
+    "입력 CSV 파일 (이름, URL, 신문사(또는 언론사), 제목, 발췌문단, 발췌문장, 일자 열 포함)", type="csv"
 )
 
 if uploaded and designated and surname and st.button("실행", type="primary"):
@@ -136,6 +136,15 @@ if uploaded and designated and surname and st.button("실행", type="primary"):
     reader = csv_module.reader(io.StringIO(raw))
     rows = list(reader)
     header, data = rows[0], rows[1:]
+    # 열 이름 별칭 정리: 입력자료에 따라 '신문사' 대신 '언론사' 등으로 적혀 있을 수 있다.
+    _alias = {"언론사": "신문사", "매체": "신문사", "매체명": "신문사", "신문": "신문사"}
+    header = [_alias.get(h.strip(), h.strip()) for h in header]
+    _need = ["이름", "URL", "신문사", "제목", "발췌문단", "발췌문장", "일자"]
+    _miss = [c for c in _need if c not in header]
+    if _miss:
+        st.error("입력 파일에 필요한 열이 없습니다: " + ", ".join(_miss)
+                 + "  (현재 열: " + ", ".join(header) + ")")
+        st.stop()
 
     with st.spinner("0단계(기사 재정렬) 처리 중..."):
         data = reorder_by_article(data, header)
