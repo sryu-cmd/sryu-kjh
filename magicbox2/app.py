@@ -19,6 +19,7 @@ from stage0_reorder import reorder_by_article
 from stage1_core import Stage1Extractor
 from stage2_group_v2 import run_stage2A, run_stage2C
 from stage3_final import run_stage3_final
+from stage4_format import build_stage4_rows
 
 st.set_page_config(page_title="발언 인용문 매직박스 (1~3단계)", layout="wide")
 
@@ -68,6 +69,12 @@ def run_stage1(data, header, designated, surname, current_posts=None, temp_abbre
             none_n += 1
         out_rows.append(r + ["   ".join(kept), pc, notes])
     return out_rows, {"total": len(data), "point_check": point_check_n, "none": none_n}
+
+
+def rows_to_csv_bytes(rows):
+    buf = io.StringIO()
+    csv_module.writer(buf).writerows(rows)
+    return buf.getvalue().encode("utf-8-sig")
 
 
 # ---------- 로그인 ----------
@@ -155,6 +162,9 @@ if uploaded and designated and surname and st.button("실행", type="primary"):
         s1_rows, stats = run_stage1(data, header, designated, surname,
                                      current_posts=current_posts, temp_abbrev_titles=temp_abbrev_titles)
     st.write("1단계 완료:", stats)
+    _prefix = build_output_prefix(uploaded.name, designated)
+    st.download_button("중간 결과 다운로드: 1단계", data=rows_to_csv_bytes(s1_rows),
+                       file_name=f"{_prefix}_1단계.csv", mime="text/csv", key="dl1", on_click="ignore")
 
     s1_header, s1_data = s1_rows[0], s1_rows[1:]
     with st.spinner("2단계(자동 그루핑) 처리 중..."):
@@ -168,6 +178,8 @@ if uploaded and designated and surname and st.button("실행", type="primary"):
     h_i = s2c_header.index("인용문(발췌)")
     active_before_dedup = [r for r in s2c_data if r[h_i].strip()]
     quotes_before_dedup = sum(r[h_i].count('"') // 2 for r in active_before_dedup)
+    st.download_button("중간 결과 다운로드: 2단계", data=rows_to_csv_bytes(s2c_rows),
+                       file_name=f"{_prefix}_2단계.csv", mime="text/csv", key="dl2", on_click="ignore")
     st.write(f"2단계 완료: 그룹 {len(active_before_dedup)}개 | 인용문 {quotes_before_dedup}개 | 미처리(편집 판단 필요) {n_review}건")
 
     with st.spinner("3단계(중복제거) 처리 중..."):
@@ -187,5 +199,15 @@ if uploaded and designated and surname and st.button("실행", type="primary"):
         data=output.getvalue().encode("utf-8-sig"),
         file_name=f"{build_output_prefix(uploaded.name, designated)}_1-3단계.csv",
         mime="text/csv",
+        on_click="ignore",
+    )
+    s4_rows = build_stage4_rows(final_rows)
+    st.download_button(
+        f"4단계 작업용 CSV 다운로드 (그룹 {len(s4_rows) - 1}개)",
+        data=rows_to_csv_bytes(s4_rows),
+        file_name=f"{_prefix}_4단계_작업용.csv",
+        mime="text/csv",
+        key="dl4",
+        on_click="ignore",
     )
     st.dataframe(pd.DataFrame(final_rows[1:], columns=final_rows[0]))
