@@ -297,8 +297,65 @@ def _apply_abc_merges(active, forced, context_min_sim):
         gx['abc_note'] = 'a+b=c 병합 적용: ' + '; '.join(notes)
 
 
+RESTORE_LOG = []
+
+
+def _restore_pairs(active, rows, idx):
+    """짝 복원(편집인 아이디어, 2026-10): 한 발언문장(F열의 한 줄)에 인용문이 둘 이상 들어 있는 '짝'에서
+    중복제거로 일부만 지워지고 일부는 존속한 경우, 지워진 짝을 그 그룹에 되살린다. 한쪽만 남으면 보충사항과
+    인용문이 어울리지 않기 때문이다. 부분집합으로 지워진 경우도 같다. 되살린 인용문은 이긴 그룹에도 남아 있으므로
+    중복이 생기는 것은 감수한다(점검사유에 표시). 짝 전체가 지워졌으면 건드리지 않는다."""
+    gid_i, f_i = idx['그룹ID'], idx['발췌문장']
+    f_by_gid = {}
+    for r in rows:
+        f_by_gid.setdefault(r[gid_i], []).extend(x for x in r[f_i].split('\n') if x.strip())
+    RESTORE_LOG.clear()
+    for g in active:
+        if g['dead_group'] or all(g['alive']) or not any(g['alive']):
+            continue
+        lines = f_by_gid.get(g['gid'], [])
+        if not lines:
+            continue
+        line_of = {}
+        for k, q in enumerate(g['quotes']):
+            parts = g.get('merged_idx', {}).get(k, [q])
+            for part in parts:
+                key = part.strip().strip('"')
+                for li, ln in enumerate(lines):
+                    if key and key in ln:
+                        line_of[k] = li
+                        break
+                if k in line_of:
+                    break
+        by_line = {}
+        for k, li in line_of.items():
+            by_line.setdefault(li, []).append(k)
+        restored = []
+        for li, ks in by_line.items():
+            if len(ks) < 2:
+                continue
+            if any(g['alive'][k] for k in ks) and not all(g['alive'][k] for k in ks):
+                for k in ks:
+                    if not g['alive'][k]:
+                        restored.append(k)
+        if not restored:
+            continue
+        winners = []
+        for k in restored:
+            g['alive'][k] = True
+            qt = g['quotes'][k]
+            for e in list(DEDUP_LOG):
+                if e[2] == g['gid'] and e[4] == qt:
+                    winners.append((e[0], e[1]))
+                    DEDUP_LOG.remove(e)
+                    break
+        wl = ', '.join(sorted({w for _r, w in winners if w != g['gid']}))
+        g['restore_note'] = (f'짝 복원: 같은 문장의 인용문 {len(restored)}개를 되살림' + (f'(그룹 {wl}와 중복)' if wl else ''))
+        RESTORE_LOG.append((g['gid'], len(restored), winners))
+
+
 def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
-                      min_subset_portion=MIN_SUBSET_PORTION):
+                      min_subset_portion=MIN_SUBSET_PORTION, restore_pairs=True):
     global MIN_SUBSET_PORTION
     MIN_SUBSET_PORTION = min_subset_portion
     DEDUP_LOG.clear()
@@ -445,7 +502,8 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
                                                threshold, context_min_sim)
                 if not hit:
                     continue
-                if containment_only and not is_containment and not (na == nb):
+                # 부분집합 정리 단계에서는 동일 인용문 쌍도 건너뛴다(개수 재계산 후 2단계c에서 처리)
+                if containment_only and (not is_containment or na == nb):
                     continue
                 if (short_a or short_b) and na != nb:
                     if short_a and not short_b:
@@ -484,6 +542,11 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
     flat = build_flat()
     pairwise_pass(flat, containment_only=False)
     sync_alive(flat)
+
+    if restore_pairs:
+        _restore_pairs(active, rows, idx)
+    else:
+        RESTORE_LOG.clear()
 
     total_orig = sum(g['orig_count'] for g in active)
     total_surviving = sum(sum((2 if k in g.get('merged_idx', {}) else 1) for k, a in enumerate(g['alive']) if a)
@@ -640,6 +703,9 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
                         surviving.append(q)
             new_row = r[:]
             new_row[h_i] = '   '.join(surviving)
+            if g.get('restore_note') and '점검사유' in header:
+                ps_i2 = header.index('점검사유')
+                new_row[ps_i2] = (new_row[ps_i2] + '; ' if new_row[ps_i2].strip() else '') + g['restore_note']
             if g.get('abc_note') and '점검사유' in header:
                 ps_i = header.index('점검사유')
                 new_row[ps_i] = (new_row[ps_i] + '; ' if new_row[ps_i].strip() else '') + g['abc_note']
