@@ -8,7 +8,7 @@
     kept_quotes, review_flag, review_note = ex.extract_row(f_text)
 """
 import re
-from title_master_list import TITLE_LIST, PARTY_NAMES, BARE_OTHER_WORDS, COMMON_SURNAMES, SPACE_REQUIRED_SURNAMES, RECEIVED_CONTENT_NOUNS, SELF_ONLY_SHORT_TITLES
+from title_master_list import BARE_OTHER_NEED_BOUNDARY, TITLE_LIST, PARTY_NAMES, BARE_OTHER_WORDS, COMMON_SURNAMES, SPACE_REQUIRED_SURNAMES, RECEIVED_CONTENT_NOUNS, SELF_ONLY_SHORT_TITLES
 
 QUOTE_PAT = re.compile(r'"[^"]*"|“[^”]*”')
 SINGLE_QUOTE_SPAN = re.compile(r'[\u2018\u2019\']')
@@ -252,7 +252,8 @@ class Stage1Extractor:
         self.GENERIC_OTHER_FORMER_TITLE_PAT = re.compile(
             r'(?<![가-힣])(' + '|'.join(other_surnames_excl_self) + r')\s?전\s?(?:' + FORMER_IMPORTANT_TITLE + r')' + josa + end
         ) if other_surnames_excl_self else None
-        self.BARE_OTHER_PAT = re.compile(r'(' + '|'.join(sorted(BARE_OTHER_WORDS, key=len, reverse=True)) + r')(은|는|이|가|도)' + end)
+        self.BARE_OTHER_PAT = re.compile(r'(' + '|'.join(('(?<![가-힣])' + re.escape(w)) if w in BARE_OTHER_NEED_BOUNDARY else w
+                                                       for w in sorted(BARE_OTHER_WORDS, key=len, reverse=True)) + r')(은|는|이|가|도)' + end)
         # 대명사("그가/그는/그녀가/그녀는")도 지정발언자를 3인칭 대명사로 부르는 경우가
         # 드물어(자기 이름/직함으로 부르는 것이 자연스러움) 제3자 신호로 취급한다.
         # (2026년 추가, 편집인 제안: "그가 '~'것이 알려지자 [지정발언자]는 '~'라고
