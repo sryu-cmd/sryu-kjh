@@ -133,6 +133,8 @@ class Stage1Extractor:
     def __init__(self, designated: str, surname: str, current_posts=None, temp_abbrev_titles=None):
         self.designated = designated
         self.surname = surname
+        # 동성 동호칭 신원 점검을 이 행에 적용할지(호칭박스가 만든 '동성 동호칭 기사 목록'에 있는 기사만 True). 기본 True.
+        self.identity_check_needed = True
         # 2026년 추가(편집인 제안): 지정발언자가 현재 맡고 있는 관공서 직책(예:
         # "행정안전부 장관", "행안부 장관")은 이름 없이 단독으로 등장해도 여전히
         # 지정발언자를 가리킨다. 이런 직책명 리스트를 입력받아, 정확히 그 문구가
@@ -1196,13 +1198,14 @@ class Stage1Extractor:
                            f'지정발언자 본인 발언인지 불분명하여 일단 발췌함 - 타인(기관) 발언이면 삭제')
         if notes:
             reasons.append(notes)
-        if _likely_other and kept:
+        _idn = getattr(self, 'identity_check_needed', True)
+        if _idn and _likely_other and kept:
             reasons.append('!!성+직함이 같은 기사에 먼저 나온 다른 사람(' + ', '.join(_likely_other[:2])
                            + ')을 가리킬 수 있음(본인 풀네임은 앞에 없음) - 본인 발언인지 확인 필요!!')
-        elif _ambiguous and kept:
+        elif _idn and _ambiguous and kept:
             reasons.append('!!같은 기사에 같은 성의 다른 사람(' + ', '.join(_ambiguous[:2])
                            + ')도 나와 성+직함이 본인인지 불분명함 - 본인 발언인지 확인 필요!!')
-        elif _no_evidence and kept:
+        elif _idn and _no_evidence and kept:
             reasons.append('!!성+직함("' + _no_evidence[0].strip()[:8] + '")만으로 본인을 지칭했고, 같은 기사(앞 문단·제목)에서 '
                            '본인 풀네임을 확인할 수 없음 - 본인 발언인지 확인 필요!!')
         _selfref_cand = [q for q in kept if self._self_ref_candidate(q)]
