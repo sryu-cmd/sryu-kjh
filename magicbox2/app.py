@@ -37,7 +37,7 @@ def build_output_prefix(input_filename, designated):
     return designated
 
 
-def run_stage1(data, header, designated, surname, current_posts=None, temp_abbrev_titles=None):
+def run_stage1(data, header, designated, surname, current_posts=None, temp_abbrev_titles=None, same_urls=None):
     idx = {n: i for i, n in enumerate(header)}
     f_i = idx["발췌문장"]
     e_i = idx.get("발췌문단")
@@ -49,12 +49,19 @@ def run_stage1(data, header, designated, surname, current_posts=None, temp_abbre
     # 지정발언자인지 같은 성의 다른 사람인지, 앞 문단에서 가장 가까운 풀네임으로 판정하는 데 쓴다.
     date_i, news_i, title_i = idx.get("일자"), idx.get("신문사"), idx.get("제목")
     cur_key, article_ctx = None, ""
+    url_i = idx.get("URL")
+    prev_ident = False      # 앞 문장이 동성 동호칭 신원 점검필요였는지(주어 생략 문장이 앞 문장의 화자를 이어받기 때문)
+    inherit_n = 0
+    IDENT_MARKS = ("!!성+직함이 같은 기사에 먼저", "!!같은 기사에 같은 성의 다른", "!!성+직함(", "앞 문장의 신원 점검필요를 승계")
     for r in data:
         f_text = r[f_i]
         e_text = r[e_i] if e_i is not None else ""
         key = (r[date_i], r[news_i], r[title_i]) if None not in (date_i, news_i, title_i) else None
         if key != cur_key:
             cur_key, article_ctx = key, ""
+            prev_ident = False
+        # 동성 동호칭 기사 목록(호칭박스)이 주어졌으면, 목록에 있는 기사만 풀네임 확인 표시를 한다.
+        ex.identity_check_needed = True if same_urls is None else (url_i is not None and r[url_i] in same_urls)
         # '앞 문단이 없음'은 E열(발췌문단) 자체가 이 인용문으로 시작하는지로 직접
         # 확인한다(행 단위로 같은 기사인지 비교하는 것보다 직접적인 증거).
         is_article_first = bool(e_text.strip()) and e_text.strip().startswith('"') \
@@ -63,12 +70,22 @@ def run_stage1(data, header, designated, surname, current_posts=None, temp_abbre
         kept, pc, notes = ex.extract_row(f_text, is_article_first, e_text, article_ctx, r[title_i] if title_i is not None else "")
         if key is not None and e_text:
             article_ctx += e_text + "\n"
+        # 주어가 없거나 대명사가 주어인 문장은 앞 문장의 화자를 이어받는다. 앞 문장이 신원 점검필요였으면 함께 표시한다.
+        _explicit = bool(ex.FULLNAME_TITLE_PAT.search(f_text) or ex.SURNAME_TITLE_PAT.search(f_text))
+        _this_ident = any(m in (notes or "") for m in IDENT_MARKS)
+        if kept and not _explicit and prev_ident and not _this_ident:
+            pc = "점검필요"
+            notes = (notes + "; " if notes else "") + "!!앞 문장의 신원 점검필요를 승계(주어 생략·대명사 주어) - 앞 문장을 확인한 뒤 함께 판단!!"
+            _this_ident = True
+            inherit_n += 1
+        if kept:
+            prev_ident = _this_ident if not _explicit or _this_ident else False
         if pc:
             point_check_n += 1
         if not kept and f_text.strip():
             none_n += 1
         out_rows.append(r + ["   ".join(kept), pc, notes])
-    return out_rows, {"total": len(data), "point_check": point_check_n, "none": none_n}
+    return out_rows, {"total": len(data), "point_check": point_check_n, "none": none_n, "앞 문장 승계 표시": inherit_n}
 
 
 def rows_to_csv_bytes(rows):
@@ -134,6 +151,10 @@ temp_abbrev_input = st.text_input(
          "그래서 이 약칭이 쓰인 행에는 결과가 맞더라도 무조건 점검필요 표시가 붙습니다. 여러 파일에서 "
          "문제없다고 확인되면 전문편집인에게 알려 영구 등록하세요."
 )
+same_file = st.file_uploader(
+    "동성 동호칭 기사 목록 CSV (선택) — 호칭박스에서 만든 CSV",
+    type="csv", key="same_up",
+    help="올리면 이 목록에 있는 기사에서만 '풀네임 확인 필요' 표시를 합니다. 올리지 않으면 지금까지처럼 모든 기사에서 표시합니다.")
 uploaded = st.file_uploader(
     "입력 CSV 파일 (이름, URL, 신문사(또는 언론사), 제목, 발췌문단, 발췌문장, 일자 열 포함)", type="csv"
 )
@@ -162,8 +183,19 @@ if uploaded and designated and surname and st.button("실행", type="primary"):
     with st.spinner(f"1단계 처리 중... ({len(data)}행)"):
         current_posts = [p.strip() for p in current_posts_input.split(",")] if current_posts_input else []
         temp_abbrev_titles = [p.strip() for p in temp_abbrev_input.split(",")] if temp_abbrev_input else []
+        same_urls = None
+        if same_file is not None:
+            _sr = list(csv_module.reader(io.StringIO(same_file.getvalue().decode("utf-8-sig"))))
+            if not _sr or "URL" not in _sr[0]:
+                st.error("동성 동호칭 기사 목록에 URL 열이 없습니다. 호칭박스에서 받은 CSV를 올려 주세요.")
+                st.stop()
+            _ui = _sr[0].index("URL")
+            same_urls = {x[_ui] for x in _sr[1:] if len(x) > _ui and x[_ui]}
         s1_rows, stats = run_stage1(data, header, designated, surname,
-                                     current_posts=current_posts, temp_abbrev_titles=temp_abbrev_titles)
+                                     current_posts=current_posts, temp_abbrev_titles=temp_abbrev_titles,
+                                     same_urls=same_urls)
+    if same_urls is not None:
+        msgs.append(f"동성 동호칭 기사 목록 적용: 목록 기사 {len(same_urls):,}건에서만 풀네임 확인 표시")
     msgs.append(f"1단계 완료: {stats}")
     files.append(("중간 결과 다운로드: 1단계", rows_to_csv_bytes(s1_rows), f"{_prefix}_1단계.csv"))
 
