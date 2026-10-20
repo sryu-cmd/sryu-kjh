@@ -639,7 +639,10 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
                     continue
                 qpos = ps[at]
                 before = raw[:qpos]
-                npos = before.rfind(_designated)
+                # '김용민TV'(채널명)·'김용민 씨'(제3자 언급)는 본인 풀네임 등장으로 치지 않는다
+                npos = -1
+                for _m in re.finditer(re.escape(_designated) + r'(?!TV|tv|티비|씨|라디오|방송|채널|쇼|유튜브|\s씨)', before):
+                    npos = _m.start()
                 if npos < 0:
                     continue
                 between = before[npos + len(_designated):]
