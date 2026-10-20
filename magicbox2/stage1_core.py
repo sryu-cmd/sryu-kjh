@@ -417,7 +417,9 @@ class Stage1Extractor:
                     # 성+직함만으로 본인을 지칭했는데, 같은 기사(앞 문단·이 문단·이 문장 앞부분·제목) 어디에서도
                     # 본인 풀네임을 확인할 수 없는 경우: 같은 성의 다른 사람일 수 있으나 프로그램이 알 방법이 없다.
                     _ctx_all = self._article_ctx + '\n' + self._e_before_f + '\n' + self._f_prefix + span[:m.start()]
-                    if self.designated not in _ctx_all and self.designated not in self._article_title:
+                    # '김용민TV'(채널명)·'김용민 씨'(제3자로 언급)는 화자가 김용민 의원임을 확인해 주지 않는다
+                    _person = re.compile(re.escape(self.designated) + r'(?!TV|tv|티비|씨|라디오|방송|채널|쇼|유튜브|\s씨)')
+                    if not _person.search(_ctx_all) and not _person.search(self._article_title):
                         self.surname_ident_log.append(('no_evidence', '', m.group(0)))
                 candidates.append((m.start(), 'designated', m.group(1)))
         for m in self.PARTY_TITLE_PAT.finditer(span):
