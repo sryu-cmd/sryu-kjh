@@ -20,7 +20,7 @@ COMPOUND_PREFIX_BLACKLIST = {'국무', '국회', '지방', '자치', '정부', '
                              '보건복지부', '복지부', '환경부', '고용노동부', '고용부',
                              '여성가족부', '여가부', '국토교통부', '국토부', '해양수산부', '해수부',
                              '중소벤처기업부', '중기부', '과학기술정보통신부', '과기정통부', '과기부',
-                             '중앙선대위', '선거대책위원회', '중앙선거대책위원회', '비서', '원내정책수석'}
+                             '중앙선대위', '선거대책위원회', '중앙선거대책위원회', '비서', '원내정책수석', '수석', '정책', '정책수석', '원내수석', '수석부', '정책수석부', '원내수석부', '원내정책수석부', '원내부', '정책위'}
 # 조사 교차확인용: 이은종속절 "~자"(묻자/하자/올리자 등) 표지
 JA_MARK = re.compile(r'[가-힣]{1,4}자(?:,|\s)')
 ASK_VERB = re.compile(r'(묻자|물었다|질문했다|물어봤다)')
@@ -186,7 +186,7 @@ class Stage1Extractor:
         # 복합 직함(예: '당 대표 비서실장', '원내대표 비서실장')의 앞부분을 위한 선택적 삽입 허용
         title_prefix = r'(?:[가-힣]{1,4}(?=지사|시장|군수|교육감|구청장))?\s?'
         connector = (r'(?:\s?\([^)]{0,30}\))?'
-                     r'(?:(?:\s전)?(?:\s(?:' + party_alt + r'))?(?:\s전)?)?'
+                     r'(?:(?:\s전)?(?:\s(?:' + party_alt + r'|당))?(?:\s전)?)?'
                      r'\s?' + title_prefix)
         josa = r'(은|는|이|가|도|또한|역시)'
         end = r'(?=[\s,.\"“”‘’]|$)'
@@ -354,14 +354,19 @@ class Stage1Extractor:
         compat_alt = '|'.join(sorted(compat, key=len, reverse=True))
         want_former = bool(re.search(r'(?:^|\s)전\s', matched[len(self.surname):]))
         follow = re.compile(r'\s?(?:(?:' + self._party_alt + r')\s)?(?:(?!전\s)(?:' + self._modifier_alt + r')\s)?'
-                            r'(?:(?P<former>전)\s)?(?:' + compat_alt + r')')
+                            r'(?:(?P<former>전)\s)?(?P<tt>' + compat_alt + r')')
         ctx = self._article_ctx + '\n' + (self._e_before_f if include_e else '') + '\n' + before_text
+
+        def _skip_list(t):
+            # '김용민·김기표 의원'처럼 이름이 나열되면 앞 이름에도 뒤의 직함이 걸린다
+            m_ = re.match(r'(?:[·,、]\s?[가-힣]{2,4})+', t)
+            return t[m_.end():] if m_ else t
         names = []   # 등장 순서
         for nm in self.PRIOR_NAME_PAT.finditer(ctx):
             name = nm.group(1)
-            if name[:2] in self._not_names or name in PARTY_NAMES or name in TITLE_LIST:
+            if name[:2] in self._not_names or name in PARTY_NAMES or name in TITLE_LIST or name[1:2] == '씨':
                 continue
-            fm = follow.match(ctx[nm.end(): nm.end() + 40])
+            fm = follow.match(_skip_list(ctx[nm.end(): nm.end() + 60]))
             if fm and bool(fm.group('former')) == want_former:
                 names.append(name)
         # 기사 제목에 같은 성의 다른 사람 풀네임이 있고 지정발언자는 제목에 없으면, 제목의 그 사람일 수 있다
@@ -371,7 +376,7 @@ class Stage1Extractor:
         if self._article_title and self.designated not in self._article_title:
             for nm in self.PRIOR_NAME_PAT.finditer(self._article_title):
                 name = nm.group(1)
-                if name[:2] in self._not_names or name in PARTY_NAMES or name in TITLE_LIST or name == self.designated:
+                if name[:2] in self._not_names or name in PARTY_NAMES or name in TITLE_LIST or name == self.designated or name[1:2] == '씨':
                     continue
                 # 이름으로 쓰인 것만 인정: 바로 뒤가 호칭·정당명이거나 따옴표·가운뎃점·쉼표·소괄호·문장 끝일 때
                 # ('이게', '이렇게', '이대남'처럼 이름이 아닌 낱말이 성으로 시작하는 경우를 거른다)
@@ -383,6 +388,41 @@ class Stage1Extractor:
                         or re.match(r'\s?["\u201c\u2018\'\u00b7\u2022\u2219,(]', _after)):
                     continue
                 title_others.append(name)
+        # 2026년 변경(편집인 지시, 김용민 피드백): '입력자료의 발언문장과 발언문단'에서 성+직함 앞쪽으로 거슬러 올라가
+        # '가장 가까운' 같은 성 풀네임+호환 직함을 만나면 그 사람으로 확정한다(지정발언자면 본인, 다른 사람이면 타인 -
+        # 둘 다 점검 불요). 범위는 이 행의 발췌문단과 문장 앞부분뿐이다(앞 행들의 문단까지 넓히면 오판이 많았다).
+        _local = (self._e_before_f if include_e else '') + '\n' + before_text
+        entries = []   # (이름들, 찾은 직함)
+        for nm in self.PRIOR_NAME_PAT.finditer(_local):
+            name = nm.group(1)
+            if name[:2] in self._not_names or name in PARTY_NAMES or name in TITLE_LIST or name[1:2] == '씨':
+                continue
+            if re.search(r'[·,、]\s?$', _local[max(0, nm.start() - 3):nm.start()]):
+                continue   # 나열의 둘째 이하 이름은 첫 이름에서 함께 처리한다
+            _after = _local[nm.end(): nm.end() + 60]
+            _ch = re.match(r'(?:[·,、]\s?[가-힣]{2,4})+', _after)
+            members = [name] + (re.findall(r'[가-힣]{2,4}', _ch.group(0)) if _ch else [])
+            fm = follow.match(_after[_ch.end():] if _ch else _after)
+            if fm and bool(fm.group('former')) == want_former:
+                _rest = (_after[_ch.end():] if _ch else _after)[fm.end():]
+                entries.append((members, fm.group('tt'), bool(re.match(r'(?:\s?등)?(?:은|는|이|가|도)(?![가-힣])', _rest))))
+        if entries:
+            mem, tt_found, as_subject = entries[-1]
+            if mem == [self.designated]:
+                return ('designated', self.designated)
+            if self.designated in mem:
+                return ('ambiguous', [n for n in mem if n != self.designated][-1])
+            # 타인으로 확정하려면 직함도 같아야 한다('동호칭'). 겸직 계열 직함끼리 다르면(예: 김 원내수석 vs 김민전 의원) 확정하지 않는다.
+            _same = as_subject and (tt_found == title) or (as_subject and _same_person_title(tt_found, title) and not (tt_found in POLITICAL_TITLE_FAMILY and title in POLITICAL_TITLE_FAMILY))
+            if _same:
+                return ('other', mem[-1])
+        # 발췌문단에 같은 성 풀네임이 없으면 기사 제목으로 확정한다: 제목에 같은 성의 다른 사람이 있고 지정발언자는
+        # 제목과 앞 문맥 어디에도 사람으로 나오지 않으면 그 사람이다('김용민TV'·'김용민 씨'는 지정발언자로 치지 않는다).
+        if title_others and title == '의원':
+            _person = re.compile(re.escape(self.designated) + r'(?!TV|tv|티비|씨|라디오|방송|채널|쇼|유튜브)')
+            if not _person.search(ctx) and not _person.search(self._article_title):
+                return ('other', title_others[0])
+        # 그 밖에는 기사 앞쪽 전체를 보고 판정하되 확정하지 않고 점검필요로 남긴다.
         if not names:
             return ('likely_other', title_others[0]) if title_others else None
         if title_others and all(n == self.designated for n in names):
@@ -391,7 +431,6 @@ class Stage1Extractor:
         if not others:
             return ('designated', self.designated)
         if self.designated not in names:
-            # 다른 사람만 나오고 본인은 나오지 않음. 자동 제외는 정확도가 낮아 기본적으로 하지 않는다.
             return ('other', others[-1]) if SURNAME_IDENT_EXCLUDE else ('likely_other', others[-1])
         return ('ambiguous', others[-1])
 
@@ -434,7 +473,7 @@ class Stage1Extractor:
         # 주어일 뿐이고 인용문은 지정발언자의 것이다.
         REPORT_RELAY_AFTER_PAT = re.compile(
             r'^(?:[가-힣\s0-9]{0,60}?)(?:기사|내용|글|보도|주장|발언|제보|메시지|인터뷰|점|것|사실|부분|대목|행태|행위|태도|처사|의혹|사례|예|근거|증거|통계|수치|자료)(?:을|를)?\s?'
-            r'(?:[가-힣]{0,10}\s?)?(?:공유하|인용하|소개하|전하|언급하|다루|게재하|게시하|올리|쓰|문제 삼|문제삼|비판하|비난하|지적하|꼬집|규탄하|반박하|거론하|강조하|우려하|겨냥하|질타하|힐난하|들|내세우|꼽|제시하|빗대)(?:으며|으면서|며|면서|고)'
+            r'(?:[가-힣]{0,10}\s?)?(?:공유하|인용하|소개하|전하|언급하|다루|게재하|게시하|올리|쓰|문제 삼|문제삼|비판하|비난하|지적하|꼬집|규탄하|반박하|거론하|강조하|우려하|겨냥하|질타하|힐난하|들|내세우|꼽|제시하|빗대|짚)(?:으며|으면서|며|면서|고|어|아|여)|(?:내세워)'
             r'|^(?:[가-힣\s0-9]{0,40}?)(?:지적|주장|비판|평가|설명)(?:하|했)(?:며|면서)'
         )
         # 안전장치: 이 규칙은 '지정발언자(은/는/도)'가 그 제3자보다 앞에 이미 나온 경우에만
@@ -1092,6 +1131,15 @@ class Stage1Extractor:
             cands = []
             for m in self.FULLNAME_TITLE_PAT.finditer(seg):
                 cands.append((m.start(), 'designated'))
+            # 2026년 추가(편집인 지시, 김용민 69·70그룹): '김 의원은'(본인 성+직함)과 '이 후보자는'(다른 성+직함)도
+            # 그 절의 명시된 화자로 인정한다. 본인 성+직함의 신원 문제는 다른 점검사유가 따로 막는다.
+            for m in self.SURNAME_TITLE_PAT.finditer(seg):
+                cands.append((m.start(), 'designated'))
+            _bare_other = re.compile(r'(?<![가-힣])([가-힣])\s?(?:(?:' + self._party_alt + r')\s)?(?:' + '|'.join(re.escape(t) for t in self._titles_by_len)
+                                     + r')(?:은|는|이|가|도)(?![가-힣])')
+            for m in _bare_other.finditer(seg):
+                if m.group(1) in COMMON_SURNAMES and m.group(1) != self.surname:
+                    cands.append((m.start(), 'other'))
             for m in self.ANY_NAME_TITLE_PAT.finditer(seg):
                 nm = m.group(1)
                 if 2 <= len(nm) <= 4 and nm[0] in COMMON_SURNAMES and nm != self.designated \
@@ -1103,6 +1151,10 @@ class Stage1Extractor:
                 if m.group(1) in INSTITUTION_SPEAKER_WORDS:
                     cands.append((m.start(), 'other'))
             if not cands:
+                # '"…"며 "…"'처럼 앞 인용문과 같은 주어를 잇는 연결어미로 시작하면 앞 인용문의 화자를 그대로 잇는다
+                if speakers and re.match(r'^(?:이라면서도|라면서도|이라면서|라면서|면서도|이라며|라며|면서|며)', seg):
+                    speakers.append(speakers[-1]); prev_end = b
+                    continue
                 return False
             speakers.append(max(cands, key=lambda c: c[0])[1])
             prev_end = b
@@ -1127,8 +1179,29 @@ class Stage1Extractor:
         self._inst_other_words = []
         self.surname_ident_log.clear()
         orig_quotes = QUOTE_PAT.findall(f_text)
+        # 2026년 추가(편집인 제안, 김용민 247·287그룹): 빈 줄(문단 나눔)로 떨어져 있는 앞 토막이 서술어 없이 끝나면
+        # (인용문으로 끝나거나 '● 제목 "인용문" 제목'처럼 서술어가 없는 경우) 기사 제목·소제목이므로 그 안의 인용문은 발췌하지 않고 점검도 붙이지 않는다.
+        _segs = re.split(r'\n[ \t]*\n', f_text)
+        _heading_q = set()
+        if len(_segs) >= 2:
+            for _sg in _segs[:-1]:
+                _outside = QUOTE_PAT.sub(' ', _sg)
+                _outside = re.sub(r'[\s.,!?\u2018\u2019\u201c\u201d"\'…·※▲▼●◆◇■□①-⑩\-]+$', '', _outside)
+                if not _outside.endswith('다'):
+                    _heading_q.update(QUOTE_PAT.findall(_sg))
+        # 2026년 추가(편집인 제안, 김용민 665·836그룹): '"인용문"는 지적이 나온다'처럼 따옴표 뒤에 관형사형 어미 + 지적·주장 등의
+        # 내용명사 + '나온다·제기된다' 류가 오면 발언의 소유자(화자)가 생략된 익명의 타인 발언이다. 명확한 판정이므로 제외하고 점검도 붙이지 않는다.
+        _ANON_TAIL = re.compile(r'^(?:이|가|라|다|라고|이라)?(?:는|란)\s?(?:지적|주장|비판|비난|우려|목소리|평가|의견|반응|시각|분석|관측|얘기|이야기|반박|해석|전망|견해|여론|불만|반발|질책|의혹|말)'
+                                r'(?:이|도|만|은|까지)?\s?(?:도\s)?(?:나온다|나오|나왔|제기|이어|있다|있었|뒤따|잇따|쏟아|터져|분출|확산|커지|거세|높다|많다|적지|따른다)')
+        for _m in QUOTE_PAT.finditer(f_text):
+            if _ANON_TAIL.match(f_text[_m.end(): _m.end() + 40]):
+                _heading_q.add(_m.group(0))
+        if _heading_q:
+            orig_quotes = [q for q in orig_quotes if q not in _heading_q]
         quotes_after_speaker_filter, low_review, raw_kinds = self._filter_third_party(f_text, is_article_first, e_text)
         kept, need_review, notes = self._filter_possessive_and_title(f_text, quotes_after_speaker_filter)
+        if _heading_q:
+            kept = [q for q in kept if q not in _heading_q]
         _ambiguous = sorted({nm for kind, nm, _mt in self.surname_ident_log if kind == 'ambiguous'})
         _likely_other = sorted({nm for kind, nm, _mt in self.surname_ident_log if kind == 'likely_other'})
         _no_evidence = [mt for kind, nm, mt in self.surname_ident_log if kind == 'no_evidence']
@@ -1290,12 +1363,38 @@ class Stage1Extractor:
         if len(distinct_names) >= 2 and kept:
             reasons.append('!!복수 화자 구조(서로 다른 이름 2인 이상) - 귀속 확인 필요!!')
 
+        # 2026년 추가(편집인 제안, 김용민 155그룹): 주어 표지(은·는·이·가·도)가 붙은 [성+호칭]·[성명+호칭]이
+        # 한 문장에 둘 이상 나오면(서로 다른 사람) 화자 귀속 오류 가능성이 있으므로 점검필요로 표시한다.
+        if kept and not any(r_.startswith('!!복수 화자 구조') for r_ in reasons):
+            _t_alt = '|'.join(re.escape(t) for t in self._titles_by_len)
+            _subj_pat = re.compile(r'(?<![가-힣])([가-힣]{1,3})\s?(?:(?:' + self._party_alt + r')\s)?(?:전\s)?(?:' + _t_alt
+                                   + r')(?:은|는|이|가|도)(?![가-힣])')
+            _toks = []
+            _SUR = set('김이박최정강조윤장임한오서신권황안송류전홍고문양손배백허유남심노하곽성차주우구민진지엄채원천방공현함변염여추도소석선설마길연위표명기반왕금옥육인맹제모탁국어은편용예경봉사부가복태목형피두감호')
+            _masked = list(f_text)
+            for _qs, _qe in quote_spans:     # 인용문 안의 호칭은 세지 않는다
+                for _k in range(_qs, min(_qe, len(_masked))):
+                    _masked[_k] = ' '
+            _masked = ''.join(_masked)
+            for _m in _subj_pat.finditer(_masked):
+                _tk = _m.group(1)
+                if (_tk == '전' and re.match(r'전\s(?:' + self._party_alt + r')', _m.group(0))) or _tk[0] not in _SUR or len(_tk) == 2 or _tk in PARTY_NAMES or _tk in TITLE_LIST or _tk[:2] in self._not_names or _tk in self._not_names:
+                    continue
+                _toks.append(_tk)
+            _people = []
+            for _tk in _toks:
+                if not any(_tk == p or (len(_tk) == 1 and p[:1] == _tk) or (len(p) == 1 and _tk[:1] == p) for p in _people):
+                    _people.append(_tk)
+            if len(_people) >= 2 and any(len(p) == 1 for p in _people):
+                reasons.append('!!주어 표지(은·는·이·가·도)가 붙은 성(명)+호칭이 한 문장에 여럿(' + ', '.join(_people[:3])
+                               + ') - 귀속 확인 필요!!')
+
         # 조사 교차확인: 표시 사유가 '자동제외' 하나뿐이고, 조사가 깨끗한 형태에서 실제 판정이
         # 기대 결과와 일치하면 점검필요 표시는 생략하되, 점검사유 칸에 흔적을 남긴다.
         if auto_excl_reason and reasons == [auto_excl_reason] and self._crosscheck_agrees(f_text, kept):
             return kept, '', f'교차확인 통과(조사 형식 일치) - {auto_excl_reason}'
         # 이은 대등절: 각 인용문의 화자가 같은 절에 풀네임으로 명시된 경우(복수 화자 표시·자동제외 표시를 모두 면제)
-        _only_structural = all(r_ == auto_excl_reason or r_.startswith('!!복수 화자 구조') for r_ in reasons) if reasons else False
+        _only_structural = all(r_ == auto_excl_reason or r_.startswith('!!복수 화자 구조') or r_.startswith('!!주어 표지') for r_ in reasons) if reasons else False
         if auto_excl_reason and _only_structural and self._coordinate_clauses_ok(f_text, kept):
             return kept, '', f'이은 대등절(각 인용문의 화자가 같은 절에 명시됨) - {auto_excl_reason}(점검 불요)'
 
