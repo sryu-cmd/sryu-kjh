@@ -16,7 +16,7 @@ import json
 import csv as csv_module
 
 from stage0_reorder import reorder_by_article
-from stage1_core import Stage1Extractor
+from stage1_core import Stage1Extractor, QUOTE_PAT as QUOTE_PAT_APP
 from stage2_group_v2 import run_stage2A, run_stage2C
 from stage3_final import run_stage3_final
 from stage4_format import build_stage4_rows
@@ -50,6 +50,7 @@ def run_stage1(data, header, designated, surname, current_posts=None, temp_abbre
     date_i, news_i, title_i = idx.get("일자"), idx.get("신문사"), idx.get("제목")
     cur_key, article_ctx = None, ""
     url_i = idx.get("URL")
+    _prev_row, _prev_row_key = None, None
     prev_ident = False      # 앞 문장이 동성 동호칭 신원 점검필요였는지(주어 생략 문장이 앞 문장의 화자를 이어받기 때문)
     inherit_n = 0
     IDENT_MARKS = ("!!성+직함이 같은 기사에 먼저", "!!같은 기사에 같은 성의 다른", "!!성+직함(", "앞 문장의 신원 점검필요를 승계")
@@ -67,7 +68,11 @@ def run_stage1(data, header, designated, surname, current_posts=None, temp_abbre
         is_article_first = bool(e_text.strip()) and e_text.strip().startswith('"') \
             and f_text.strip().startswith('"') \
             and e_text.strip()[:20] == f_text.strip()[:20]
+        ex.prev_row = _prev_row if (key is not None and _prev_row_key == key) else None
         kept, pc, notes = ex.extract_row(f_text, is_article_first, e_text, article_ctx, r[title_i] if title_i is not None else "")
+        _nq = len(QUOTE_PAT_APP.findall(f_text))
+        _prev_row = {'f': f_text, 'state': 'removed' if (_nq and not kept and not pc) else ('kept' if kept and not pc else 'flag')}
+        _prev_row_key = key
         if key is not None and e_text:
             article_ctx += e_text + "\n"
         # 주어가 없거나 대명사가 주어인 문장은 앞 문장의 화자를 이어받는다. 앞 문장이 신원 점검필요였으면 함께 표시한다.
