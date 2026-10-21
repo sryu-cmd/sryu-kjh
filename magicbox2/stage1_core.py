@@ -34,6 +34,9 @@ ASK_VERB = re.compile(r'(묻자|물었다|질문했다|물어봤다)')
 ORG_SUFFIX_CHARS = set('부처청단위국실')
 
 
+_SSI_GUARD = {'마음씨', '맘씨', '말씨', '솜씨', '글씨', '날씨', '모양씨', '나씨', '맵시'}
+
+
 def _looks_like_org_name(name):
     return bool(name) and name[-1] in ORG_SUFFIX_CHARS
 
@@ -212,6 +215,10 @@ class Stage1Extractor:
         # 것(결과적으로 '후보없음'->기본값인 designated로 처리됨)이 아니라, 명시적으로
         # '제3자' 후보로 등록해야 한다.
         self.NAME_SSI_OTHER_PAT = re.compile(re.escape(designated) + r'\s?씨' + josa + end)
+        # 2026-10 추가(편집인 강선우 피드백 52·383·436그룹): '윤씨는', '남씨가', '김경씨는'처럼 성(이름)+씨가 주어이면
+        # 지정발언자가 아닌 제3자의 발화이다(지정발언자는 '씨'로 불리지 않는다). '마음씨·말씨'류는 성씨가 아니므로 제외한다.
+        self.GENERIC_SSI_PAT = re.compile(
+            r'(?<![가-힣])((?:' + '|'.join(COMMON_SURNAMES) + r')(?:[가-힣]{1,2})?씨)(?:는|가|도|은|이)(?![가-힣])')
         self.ANY_NAME_TITLE_PAT = re.compile(r'([가-힣]{2,6})' + connector + r'(?:' + title_pat + r')' + title_suffix + josa + end)
         self.SURNAME_TITLE_PAT = re.compile(r'(?<![가-힣])' + surname + connector + r'(?:' + self_title_pat + r')' + title_suffix + josa + end)
         # 정당명+직함(이름 없이) 구조, 복수(들)에 한정 (예: "민주당 의원들은") -
@@ -415,6 +422,7 @@ class Stage1Extractor:
             # 타인으로 확정하려면 직함도 같아야 한다('동호칭'). 겸직 계열 직함끼리 다르면(예: 김 원내수석 vs 김민전 의원) 확정하지 않는다.
             _same = as_subject and (tt_found == title) or (as_subject and _same_person_title(tt_found, title) and not (tt_found in POLITICAL_TITLE_FAMILY and title in POLITICAL_TITLE_FAMILY))
             if _same:
+                self._confirmed_other.add(mem[-1])
                 return ('other', mem[-1])
         # 발췌문단에 같은 성 풀네임이 없으면 기사 제목으로 확정한다: 제목에 같은 성의 다른 사람이 있고 지정발언자는
         # 제목과 앞 문맥 어디에도 사람으로 나오지 않으면 그 사람이다('김용민TV'·'김용민 씨'는 지정발언자로 치지 않는다).
@@ -444,6 +452,10 @@ class Stage1Extractor:
             candidates.append((m.start(), 'other', m.group(0)))
         for m in self.NAME_OFFICE_OTHER_PAT.finditer(span):
             candidates.append((m.start(), 'other', m.group(0)))
+        for m in self.GENERIC_SSI_PAT.finditer(span):
+            if m.group(1) in _SSI_GUARD:
+                continue
+            candidates.append((m.start(), 'other', m.group(1)))
         for m in self.SURNAME_TITLE_PAT.finditer(span):
             ident = self._surname_identity(m.group(0), self._f_prefix + span[:m.start()])
             if ident and ident[0] == 'other':
@@ -723,6 +735,12 @@ class Stage1Extractor:
         e_confirmed_designated = False
         f_text_stripped = f_text.rstrip('.')
         self._e_before_f = e_text[:e_text.find(f_text_stripped)] if (e_text and f_text_stripped and f_text_stripped in e_text) else ''
+        if not self._e_before_f and e_text and f_text_stripped:
+            # 발췌문장이 줄바꿈으로 이어져 있어 발췌문단(E)에 통째로 들어 있지 않으면 첫 문장의 앞부분으로 위치를 찾는다(강선우 1그룹)
+            _head = f_text_stripped.split('\n')[0][:40]
+            _ix = e_text.find(_head) if len(_head) >= 15 else -1
+            if _ix > 0:
+                self._e_before_f = e_text[:_ix]
         if e_text and f_text_stripped and f_text_stripped in e_text:
             e_before_f = e_text[:e_text.find(f_text_stripped)]
             def _surname_designated_in(txt):
@@ -1140,6 +1158,9 @@ class Stage1Extractor:
             for m in _bare_other.finditer(seg):
                 if m.group(1) in COMMON_SURNAMES and m.group(1) != self.surname:
                     cands.append((m.start(), 'other'))
+            for m in self.GENERIC_SSI_PAT.finditer(seg):
+                if m.group(1) not in _SSI_GUARD:
+                    cands.append((m.start(), 'other'))
             for m in self.ANY_NAME_TITLE_PAT.finditer(seg):
                 nm = m.group(1)
                 if 2 <= len(nm) <= 4 and nm[0] in COMMON_SURNAMES and nm != self.designated \
@@ -1148,11 +1169,12 @@ class Stage1Extractor:
                     cands.append((m.start(), 'other'))
             # 기관·정당·정부 이름도 그 절의 화자로 인정한다("대통령실은 이에 대해 '…'라고 했다")
             for m in self.BARE_OTHER_PAT.finditer(seg):
-                if m.group(1) in INSTITUTION_SPEAKER_WORDS:
+                if m.group(1) in INSTITUTION_SPEAKER_WORDS or m.group(1) in ('시의원', '도의원', '구의원', '군의원', '취재진'):
                     cands.append((m.start(), 'other'))
             if not cands:
                 # '"…"며 "…"'처럼 앞 인용문과 같은 주어를 잇는 연결어미로 시작하면 앞 인용문의 화자를 그대로 잇는다
-                if speakers and re.match(r'^(?:이라면서도|라면서도|이라면서|라면서|면서도|이라며|라며|면서|며)', seg):
+                if speakers and (re.match(r'^(?:이라면서도|라면서도|이라면서|라면서|면서도|이라며|라며|면서|며)', seg)
+                                 or re.search(r'(?:^|[다요]\.?\s*[\n ])\s*(?:그러면서도?|이어서?|또한?|아울러|덧붙여)\s*$', seg.strip() + '')):
                     speakers.append(speakers[-1]); prev_end = b
                     continue
                 return False
@@ -1160,6 +1182,64 @@ class Stage1Extractor:
             prev_end = b
         expected = [q.group(0) for q, sp in zip(qms, speakers) if sp == 'designated']
         return expected == list(kept)
+
+    def _prev_row_removed(self, f_text, ss):
+        """바로 앞 행(app이 prev_row로 알려 줌)의 발췌문장이 이 행 발췌문장의 바로 앞 문장이고, 그 행의 인용문이 점검 없이 전부 제외됐는가."""
+        pr = getattr(self, 'prev_row', None)
+        if not pr or pr.get('state') != 'removed' or ss > 0:
+            return False
+        last = (pr.get('f') or '').strip().split('\n')[-1].rstrip('. ').strip()
+        return bool(last) and self._e_before_f.rstrip('. \n').endswith(last[-40:])
+
+    def _has_named_subject(self, txt):
+        """문장 조각에 이름·호칭 주어(은/는/이/가/도)가 있는지(대명사 승계를 막는 용도)."""
+        for pat in (self.FULLNAME_TITLE_PAT, self.SURNAME_TITLE_PAT):
+            for m in pat.finditer(txt):
+                if m.group(1) in ('은', '는', '이', '가', '도'):
+                    return True
+        for m in self.ANY_NAME_TITLE_PAT.finditer(txt):
+            if m.group(2) in ('은', '는', '이', '가', '도'):
+                return True
+        if self.GENERIC_OTHER_SURNAME_PAT.search(txt) or self.GENERIC_SSI_PAT.search(txt):
+            return True
+        for m in self.BARE_OTHER_PAT.finditer(txt):
+            if m.group(2) in ('은', '는', '이', '가'):
+                return True
+        return False
+
+    def _prev_subject(self, ctx):
+        """앞 문장들을 거슬러 올라가며(대명사 주어 문장은 건너뜀) 주어가 타인으로 확정이면 ('other', 이름), 지정발언자면 ('designated', ''),
+        불확실하면 (None, '')."""
+        sents = [x for x in re.split(r'(?<=다)\.\s+|\n+', ctx.strip()) if x.strip()]
+        for sent in reversed(sents[-6:]):
+            if re.match(r'\s*(?:그는|그가|그녀는|그녀가|그들은|그들이|이들은|이들이)\s', sent):
+                continue
+            t = self._mask_single_quoted(QUOTE_PAT.sub(' ', sent))
+            des, oth = [], []
+            for pat in (self.FULLNAME_TITLE_PAT, self.SURNAME_TITLE_PAT):
+                for m in pat.finditer(t):
+                    if m.group(1) in ('은', '는', '이', '가', '도'):
+                        des.append(m.start())
+            for m in self.ANY_NAME_TITLE_PAT.finditer(t):
+                nm = m.group(1)
+                if m.group(2) in ('은', '는', '이', '가', '도') and nm != self.designated and nm not in self.designated \
+                        and nm not in PARTY_NAMES and nm not in TITLE_LIST and nm not in COMPOUND_PREFIX_BLACKLIST \
+                        and nm[:1] in COMMON_SURNAMES:
+                    oth.append((m.start(), nm))
+            for m in self.GENERIC_SSI_PAT.finditer(t):
+                oth.append((m.start(), m.group(1)))
+            for m in self.GENERIC_OTHER_SURNAME_PAT.finditer(t):
+                oth.append((m.start(), m.group(1)))
+            if self.designated in t:
+                des.append(0) if not des else None
+            if des and oth:
+                return (None, '')
+            if oth:
+                return ('other', sorted(oth)[0][1])
+            if des:
+                return ('designated', '')
+            return (None, '')
+        return (None, '')
 
     def extract_row(self, f_text, is_article_first=False, e_text='', article_context='', article_title=''):
         """전체 1단계 파이프라인: 발췌 -> 타인발언제외 -> 소유격/제목필터.
@@ -1175,6 +1255,7 @@ class Stage1Extractor:
         self._article_ctx = (article_context or '')[-8000:]
         self._article_title = article_title or ''
         self._carry_other_name = ''
+        self._confirmed_other = set()
         self._low_conf_words = []
         self._inst_other_words = []
         self.surname_ident_log.clear()
@@ -1184,7 +1265,10 @@ class Stage1Extractor:
         _segs = re.split(r'\n[ \t]*\n', f_text)
         _heading_q = set()
         if len(_segs) >= 2:
-            for _sg in _segs[:-1]:
+            for _si, _sg in enumerate(_segs[:-1]):
+                # 앞 토막이 인용문으로만 이루어져도 뒤 토막이 '이렇게/이같이 말했다'로 받으면 리드 인용문이지 소제목이 아니다(김용민 427그룹)
+                if re.match(r'[\s\S]{0,200}?(?:이렇게|이같이|이와\s?같이|이처럼|이런\s?취지로)\s?(?:말|밝|강조|주장|비판|지적|전했|했)', _segs[_si + 1]):
+                    continue
                 _outside = QUOTE_PAT.sub(' ', _sg)
                 _outside = re.sub(r'[\s.,!?\u2018\u2019\u201c\u201d"\'…·※▲▼●◆◇■□①-⑩\-]+$', '', _outside)
                 if not _outside.endswith('다'):
@@ -1196,12 +1280,77 @@ class Stage1Extractor:
         for _m in QUOTE_PAT.finditer(f_text):
             if _ANON_TAIL.match(f_text[_m.end(): _m.end() + 40]):
                 _heading_q.add(_m.group(0))
+        # 2026-10 추가(편집인 강선우 282·286그룹): '● 제목 "인용문"'처럼 ●·▲ 등으로 시작하고 서술어 없이 끝나는 한 줄은 소제목이다.
+        _one = f_text.strip()
+        if len(_segs) == 1 and re.match(r'[●◆■▶▲▼◇□○]', _one):
+            _o = re.sub(r'[\s.,!?\u2018\u2019\u201c\u201d"\'…·※]+$', '', QUOTE_PAT.sub(' ', _one))
+            if not _o.endswith('다'):
+                _heading_q.update(QUOTE_PAT.findall(_one))
+        # 2026-10 추가(편집인 강선우 269·273·415·416·429그룹): 취재진의 질문 인용문은 확정적 타인 발언이다(점검 불요).
+        #  ① '"…느냐" "…느냐" 등 질문에 답하지 않은 / 는 질문' ② '취재진이 "…느냐"고 물었지만'
+        _QEND = re.compile(r'(?:냐|까|니|나요|가요|죠|ㄴ가|은가|인가|있나|없나|할까|될까)\s*[?.]?\s*$')
+        _qs = list(QUOTE_PAT.finditer(f_text))
+        _i = 0
+        while _i < len(_qs):
+            _j = _i
+            while _j + 1 < len(_qs) and re.fullmatch(r'\s{0,3}', f_text[_qs[_j].end():_qs[_j + 1].start()]):
+                _j += 1
+            _chain = _qs[_i:_j + 1]
+            if all(_QEND.search(m_.group(0).strip('"\u201c\u201d\u2018\u2019\'').strip()) for m_ in _chain):
+                _tail = f_text[_chain[-1].end(): _chain[-1].end() + 30]
+                _head = f_text[max(0, _chain[0].start() - 16): _chain[0].start()]
+                if re.match(r'\s?(?:(?:라는|이라는|는|란)?\s?등(?:의)?\s?(?:취재진의?\s?|기자들의?\s?)?(?:질문|물음)|(?:라는|이라는|는|란)\s?(?:질문|물음))', _tail) \
+                        or (re.search(r'(?:취재진|기자들|기자)(?:이|가)?\s?$', _head)
+                            and re.match(r'(?:이?라?고|라며|라면서)\s?(?:물었|묻자|질문|따져|추궁)', _tail)):
+                    for m_ in _chain:
+                        _heading_q.add(m_.group(0))
+            _i = _j + 1
         if _heading_q:
             orig_quotes = [q for q in orig_quotes if q not in _heading_q]
         quotes_after_speaker_filter, low_review, raw_kinds = self._filter_third_party(f_text, is_article_first, e_text)
         kept, need_review, notes = self._filter_possessive_and_title(f_text, quotes_after_speaker_filter)
         if _heading_q:
             kept = [q for q in kept if q not in _heading_q]
+        # 2026-10 추가(편집인 강선우 159·216그룹): 주어가 대명사(그는·그들은·이들은)이거나 생략된 문장은 앞 문장의 판정을 승계한다.
+        #  ① 앞 문장의 주어가 (지정발언자 아닌) 타인으로 확정이면 이 문장의 인용문도 타인 발언 -> 조용히 제외
+        #  ② '그러면서 "…"'처럼 주어 생략 + 연결어로 시작하고, 바로 앞 인용문이 자동제외됐으면 이 인용문도 제외
+        self._silent_notes = []
+        if kept:
+            _qm = list(QUOTE_PAT.finditer(f_text))
+            _gone = set()
+            _PRON = re.compile(r'\s*(?:그는|그가|그녀는|그녀가|그들은|그들이|이들은|이들이)\s')
+            _CONN = re.compile(r'\s*(?:그러면서도?|이어서?|또한?|아울러|덧붙여|그리고)\s')
+            for _qi, _m in enumerate(_qm):
+                _q = _m.group(0)
+                if _q not in kept or _q in _gone:
+                    continue
+                _a1 = f_text.rfind('\n', 0, _m.start())
+                _a2 = f_text.rfind('다. ', 0, _m.start())
+                _ss = max(_a1 + 1 if _a1 >= 0 else 0, _a2 + 3 if _a2 >= 0 else 0)
+                _pre = f_text[_ss:_m.start()]
+                _pre_m = self._mask_single_quoted(QUOTE_PAT.sub(' ', _pre))
+                _who = None
+                if _PRON.match(_pre):
+                    _rest = _pre_m[_PRON.match(_pre).end():]
+                    if not self._has_named_subject(_rest):
+                        _kind, _nm = self._prev_subject(self._article_ctx[-1500:] + '\n' + self._e_before_f + f_text[:_ss])
+                        if _kind == 'other':
+                            _who = '앞 문장 주어(' + _nm + ')를 대명사로 승계'
+                        elif _kind is None and self._prev_row_removed(f_text, _ss):
+                            _who = '앞 문장(바로 앞 행)의 제외 판정을 대명사 주어로 승계'
+                elif _CONN.match(_pre) and _qi > 0 and not self._has_named_subject(_pre_m[_CONN.match(_pre).end():]):
+                    _pq = _qm[_qi - 1].group(0)
+                    if _pq in orig_quotes and _pq not in kept and _pq not in _heading_q or _pq in _gone:
+                        _who = '앞 인용문 화자를 주어 생략으로 승계'
+                if _who:
+                    _gone.add(_q)
+                    self._silent_notes.append(_who + '하여 타인 발언으로 판정(점검 불요)')
+                    self._carry_other_name = self._carry_other_name or '앞문장승계'
+            if _gone:
+                orig_quotes = [q for q in orig_quotes if q not in _gone]
+                kept = [q for q in kept if q not in _gone]
+                if 'other' not in raw_kinds:
+                    raw_kinds = list(raw_kinds) + ['other']
         _ambiguous = sorted({nm for kind, nm, _mt in self.surname_ident_log if kind == 'ambiguous'})
         _likely_other = sorted({nm for kind, nm, _mt in self.surname_ident_log if kind == 'likely_other'})
         _no_evidence = [mt for kind, nm, mt in self.surname_ident_log if kind == 'no_evidence']
@@ -1316,6 +1465,9 @@ class Stage1Extractor:
         if self._carry_other_name:
             distinct_names.add(self._carry_other_name)
         distinct_names.update(self._inst_other_words)
+        for _sm in self.GENERIC_SSI_PAT.finditer(f_text):
+            if _sm.group(1) not in _SSI_GUARD:
+                distinct_names.add(_sm.group(1))
         if self.NAME_SSI_OTHER_PAT.search(f_text):
             distinct_names.add(self.designated + '씨')
         if self.NAME_OFFICE_OTHER_PAT.search(f_text):
@@ -1351,10 +1503,10 @@ class Stage1Extractor:
                     for pat in (self.FULLNAME_TITLE_PAT, self.SURNAME_TITLE_PAT)
                     for m in pat.finditer(f_text)
                 )
-                if _resolved_other and not _designated_as_topic:
+                if _resolved_other and not _designated_as_topic and not all(n_ in self._confirmed_other for n_ in _resolved_other):
                     reasons.append('!!성+직함 표현이 같은 기사 앞쪽의 풀네임(' + ', '.join(_resolved_other[:2])
                                    + ')으로 판정되어 인용문이 전부 제외됨 - 본인 발언인지 확인 필요!!')
-                if _designated_as_topic:
+                if _designated_as_topic and not any(m_.group(1) not in _SSI_GUARD for m_ in self.GENERIC_SSI_PAT.finditer(f_text)):
                     reasons.append('!!본인이 주어로 나오는 문장인데 인용문이 전부 제3자 발언으로 제외됨 - 발췌누락 여부 확인 필요!!')
         # 2026년 추가(편집인 제안): "[제3자A]는 '~', [designated 또는 제3자B]는
         # '~'라고 했다"처럼, 서로 다른 이름(직함 포함)의 인물이 2명 이상 나오고
@@ -1389,6 +1541,31 @@ class Stage1Extractor:
                 reasons.append('!!주어 표지(은·는·이·가·도)가 붙은 성(명)+호칭이 한 문장에 여럿(' + ', '.join(_people[:3])
                                + ') - 귀속 확인 필요!!')
 
+        # 2026-10 추가(편집인 강선우 88그룹): 인용문 안에 지정발언자와 같은 성+호칭('강 의원')이 있으면 타인 발언일 수 있다.
+        _sn = []
+        _sn_pat = re.compile(r'(?<![가-힣])' + re.escape(self.surname) + r'\s?(?:전\s)?(?:' + '|'.join(re.escape(t) for t in self._titles_by_len)
+                             + r')(?:은|는|이|가|도|을|를|의|에게|에|께)?(?![가-힣])')
+        for _q in kept:
+            _sm = _sn_pat.search(_q)
+            if _sm and self.designated not in _q:
+                _sn.append(_sm.group(0).strip())
+        if _sn:
+            reasons.append('!!인용문 안에 지정발언자와 같은 성+호칭(' + ', '.join(dict.fromkeys(_sn))[:20] + ')이 있음 - 타인 발언일 수 있어 확인 필요!!')
+        # 2026-10 추가(편집인 강선우 156그룹): 정당명(민주당이·국민의힘은)과 지정발언자가 모두 주어 표지를 갖고 한 문장에 나오면 귀속을 점검한다.
+        if kept and not any(r_.startswith('!!복수 화자 구조') or r_.startswith('!!주어 표지') for r_ in reasons):
+            _mk = list(f_text)
+            for _qs2, _qe2 in quote_spans:
+                for _k in range(_qs2, min(_qe2, len(_mk))):
+                    _mk[_k] = ' '
+            _mk = ''.join(_mk)
+            _pm = re.search(r'(?<![가-힣])(' + '|'.join(sorted(map(re.escape, PARTY_NAMES), key=len, reverse=True)) + r')(?:이|가|은|는)(?![가-힣])', _mk)
+            _dpos = [m_.start() for pat_ in (self.FULLNAME_TITLE_PAT, self.SURNAME_TITLE_PAT) for m_ in pat_.finditer(_mk) if m_.group(1) in ('은', '는', '도')]
+            # 정당명이 지정발언자보다 앞에 있고, 지정발언자 바로 앞이 관형절('…주도한 김 의원은')이 아닐 때만(관계절 속 정당명 오탐 방지)
+            _dm = bool(_dpos) and _pm is not None and _pm.start() < min(_dpos) \
+                and not re.search(r'[한던될된할는은인]\s*$', re.sub(r'[,\s]+$', '', _mk[:min(_dpos)]) if not _mk[:min(_dpos)].rstrip().endswith(',') else 'x')
+            if _pm and _dm:
+                reasons.append('!!주어 표지(은·는·이·가·도)가 붙은 정당명(' + _pm.group(1) + ')과 지정발언자가 한 문장에 함께 나옴 - 귀속 확인 필요!!')
+
         # 조사 교차확인: 표시 사유가 '자동제외' 하나뿐이고, 조사가 깨끗한 형태에서 실제 판정이
         # 기대 결과와 일치하면 점검필요 표시는 생략하되, 점검사유 칸에 흔적을 남긴다.
         if auto_excl_reason and reasons == [auto_excl_reason] and self._crosscheck_agrees(f_text, kept):
@@ -1398,6 +1575,9 @@ class Stage1Extractor:
         if auto_excl_reason and _only_structural and self._coordinate_clauses_ok(f_text, kept):
             return kept, '', f'이은 대등절(각 인용문의 화자가 같은 절에 명시됨) - {auto_excl_reason}(점검 불요)'
 
+        # 가까운 같은 성 풀네임+같은 호칭(주어)으로 타인이 확정되어 인용문이 전부 제외됐으면(편집인 강선우 1그룹) 점검을 붙이지 않는다
+        if orig_quotes and not kept and self._confirmed_other and (not reasons or reasons == [auto_excl_reason]):
+            return kept, '', '가까운 타인(' + ', '.join(sorted(self._confirmed_other)) + ')으로 확정되어 전부 제외됨(점검불요)'
         point_check = '점검필요' if reasons else ''
-        final_notes = '; '.join(reasons) if reasons else (locals().get('silent_reason') or '')
+        final_notes = '; '.join(reasons) if reasons else '; '.join(x for x in [locals().get('silent_reason') or ''] + list(dict.fromkeys(self._silent_notes)) if x)
         return kept, point_check, final_notes
