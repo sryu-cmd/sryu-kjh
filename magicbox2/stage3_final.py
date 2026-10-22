@@ -48,6 +48,8 @@ UNMATCHED_RUN_MAX = 8
 FUZZY_HIGH = 0.90
 # 짧은 인용문이 모집합에 글자 그대로 들어 있고 이 길이 이상이면 모집합 구성비 하한(30%)을 면제한다.
 EXACT_CONTAIN_MIN = 12
+# 같은 날짜의 그룹끼리는 글자 그대로 포함되는 짧은 인용문(9자 이상)도 부분집합으로 본다(강선우 4그룹↔6그룹).
+EXACT_CONTAIN_MIN_SAMEDAY = 12
 
 
 def _longest_unmatched_run(short, long_):
@@ -134,7 +136,7 @@ def _load_groups(rows, header):
     return active, idx
 
 
-def _quote_match(ta, tb, ctx_a, ctx_b, threshold, context_min_sim):
+def _quote_match(ta, tb, ctx_a, ctx_b, threshold, context_min_sim, same_day=False):
     na, nb = normalize_keep_order(ta), normalize_keep_order(tb)
     if not na or not nb:
         return False, False
@@ -172,7 +174,7 @@ def _quote_match(ta, tb, ctx_a, ctx_b, threshold, context_min_sim):
     shorter_len = min(len(na), len(nb))
     longer_len = max(len(na), len(nb))
     portion = shorter_len / longer_len if longer_len else 0
-    exact_contain = (na in nb or nb in na) and shorter_len >= EXACT_CONTAIN_MIN
+    exact_contain = (na in nb or nb in na) and shorter_len >= (EXACT_CONTAIN_MIN_SAMEDAY if same_day else EXACT_CONTAIN_MIN)
     if portion < MIN_SUBSET_PORTION and not exact_contain:
         return False, False
     if portion >= threshold:
@@ -367,11 +369,11 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
     forced = set()
     _apply_abc_merges(active, forced, context_min_sim)
 
-    def match_fn(ta, tb, ctx_a, ctx_b, th, ms):
+    def match_fn(ta, tb, ctx_a, ctx_b, th, ms, same_day=False):
         # a+b=c로 짝지어진 (합친 인용문, C)는 구성상 같은 인용문으로 본다(유사도 재검사 안 함)
         if (ta, tb) in forced:
             return True, False
-        return _quote_match(ta, tb, ctx_a, ctx_b, th, ms)
+        return _quote_match(ta, tb, ctx_a, ctx_b, th, ms, same_day)
 
     def try_whole_group_match():
         """살아있는 그룹들을, '현재 살아있는 인용문 개수'로 다시 묶어서 완전
@@ -499,7 +501,8 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
                 na, nb = normalize_keep_order(ta), normalize_keep_order(tb)
                 short_a, short_b = len(na) <= SHORT_LEN, len(nb) <= SHORT_LEN
                 hit, is_containment = match_fn(ta, tb, flat_[i]['g']['context'], flat_[j]['g']['context'],
-                                               threshold, context_min_sim)
+                                               threshold, context_min_sim,
+                                               same_day=(flat_[i]['g']['date'] == flat_[j]['g']['date']))
                 if not hit:
                     continue
                 # 부분집합 정리 단계에서는 동일 인용문 쌍도 건너뛴다(개수 재계산 후 2단계c에서 처리)
