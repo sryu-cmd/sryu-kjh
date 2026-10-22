@@ -1342,6 +1342,13 @@ class Stage1Extractor:
                     _pq = _qm[_qi - 1].group(0)
                     if _pq in orig_quotes and _pq not in kept and _pq not in _heading_q or _pq in _gone:
                         _who = '앞 인용문 화자를 주어 생략으로 승계'
+                if not _who and _ss == 0 and (_CONN.match(_pre) or not _pre.strip()):
+                    # 발췌문장이 한 문장씩 행으로 나뉜 입력: 주어가 생략된 첫 인용문은 바로 앞 행(앞 문장)의 제외 판정을 승계한다
+                    _after = QUOTE_PAT.sub(lambda m_: ' ' * len(m_.group(0)), f_text)[_m.end(): _m.end() + 45]
+                    _lead = _pre_m[_CONN.match(_pre).end():] if _CONN.match(_pre) else ''
+                    if not self._has_named_subject(_lead) and not self._has_named_subject(self._mask_single_quoted(_after)) \
+                            and self._prev_row_removed(f_text, _ss):
+                        _who = '앞 문장(바로 앞 행)의 제외 판정을 주어 생략으로 승계'
                 if _who:
                     _gone.add(_q)
                     self._silent_notes.append(_who + '하여 타인 발언으로 판정(점검 불요)')
@@ -1575,6 +1582,11 @@ class Stage1Extractor:
         if auto_excl_reason and _only_structural and self._coordinate_clauses_ok(f_text, kept):
             return kept, '', f'이은 대등절(각 인용문의 화자가 같은 절에 명시됨) - {auto_excl_reason}(점검 불요)'
 
+        # 주어가 대명사·생략이고 바로 앞 행이 점검 없이 제외된 문장이면, 이 문장의 인용문이 전부 제외돼도 점검을 붙이지 않는다(강선우 152·157·213그룹)
+        if orig_quotes and not kept and (not reasons or reasons == [auto_excl_reason]) \
+                and re.match(r'\s*(?:(?:그는|그가|그녀는|그녀가|그들은|그들이|이들은|이들이|그러면서도?|이어서?|또한?|아울러|덧붙여|그리고)\s|["\u201c])', f_text) \
+                and self._prev_row_removed(f_text, 0):
+            return kept, '', '앞 문장(바로 앞 행)의 제외 판정을 승계하여 전부 제외됨(점검불요)'
         # 가까운 같은 성 풀네임+같은 호칭(주어)으로 타인이 확정되어 인용문이 전부 제외됐으면(편집인 강선우 1그룹) 점검을 붙이지 않는다
         if orig_quotes and not kept and self._confirmed_other and (not reasons or reasons == [auto_excl_reason]):
             return kept, '', '가까운 타인(' + ', '.join(sorted(self._confirmed_other)) + ')으로 확정되어 전부 제외됨(점검불요)'
