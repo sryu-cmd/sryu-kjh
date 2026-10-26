@@ -37,11 +37,11 @@ def build_output_prefix(input_filename, designated):
     return designated
 
 
-def run_stage1(data, header, designated, surname, current_posts=None, temp_abbrev_titles=None, same_urls=None):
+def run_stage1(data, header, designated, surname, current_posts=None, temp_abbrev_titles=None, same_urls=None, exclude_titles=None, extra_other_words=None):
     idx = {n: i for i, n in enumerate(header)}
     f_i = idx["발췌문장"]
     e_i = idx.get("발췌문단")
-    ex = Stage1Extractor(designated, surname, current_posts=current_posts, temp_abbrev_titles=temp_abbrev_titles)
+    ex = Stage1Extractor(designated, surname, current_posts=current_posts, temp_abbrev_titles=temp_abbrev_titles, exclude_titles=exclude_titles, extra_other_words=extra_other_words)
     out_header = header + ["인용문(발췌)", "점검필요", "점검사유"]
     out_rows = [out_header]
     point_check_n, none_n = 0, 0
@@ -156,6 +156,10 @@ temp_abbrev_input = st.text_input(
          "그래서 이 약칭이 쓰인 행에는 결과가 맞더라도 무조건 점검필요 표시가 붙습니다. 여러 파일에서 "
          "문제없다고 확인되면 전문편집인에게 알려 영구 등록하세요."
 )
+exclude_input = st.text_input(
+    "이 인물이 가질 수 없는 호칭 (선택, 쉼표로 구분) — 예: 원내대표",
+    help="예) 당대표였던 한동훈에게는 '원내대표'가 없습니다. 그러면 '한 원내대표는'은 같은 성의 다른 사람(한병도 등)으로 처리합니다."
+)
 same_file = st.file_uploader(
     "동성 동호칭 기사 목록 CSV (선택) — 호칭박스에서 만든 CSV",
     type="csv", key="same_up",
@@ -163,6 +167,38 @@ same_file = st.file_uploader(
 uploaded = st.file_uploader(
     "입력 CSV 파일 (이름, URL, 신문사(또는 언론사), 제목, 발췌문단, 발췌문장, 일자 열 포함)", type="csv"
 )
+
+extra_file = st.file_uploader(
+    "추가 타인 화자 목록 (선택) — 아래 '타인 화자 후보 찾기'에서 받은 CSV(채택 열에 O 표시) 또는 한 줄에 하나씩 적은 txt",
+    type=["csv", "txt"], key="extra_up",
+    help="여기에 올린 말(예: 지지자들, 윤리위, 토론단)은 이 파일을 돌릴 때 타인 화자로 인식합니다. 영구 등록은 아니며, 여러 파일에서 반복되면 title_master_list.py에 추가하세요.")
+
+if uploaded and designated and surname and st.button("타인 화자 후보 찾기"):
+    from speaker_candidates import find_candidates
+    _raw = uploaded.getvalue().decode("utf-8-sig")
+    _rows = list(csv_module.reader(io.StringIO(_raw)))
+    _alias2 = {"언론사": "신문사", "매체": "신문사", "매체명": "신문사", "신문": "신문사"}
+    _h = [_alias2.get(h.strip(), h.strip()) for h in _rows[0]]
+    if "발췌문장" not in _h:
+        st.error("입력 파일에 '발췌문장' 열이 없습니다.")
+    else:
+        _extra0 = []
+        if extra_file is not None:
+            from speaker_candidates import parse_adopted
+            _extra0 = parse_adopted(extra_file.getvalue().decode("utf-8-sig"))
+        _cands = find_candidates(_rows[1:], _h, designated, surname,
+                                 extra_known=_extra0,
+                                 current_posts=[p.strip() for p in current_posts_input.split(",")] if current_posts_input else None,
+                                 exclude_titles=[p.strip() for p in exclude_input.split(",")] if exclude_input else None)
+        if not _cands:
+            st.info("목록에 없는 타인 화자 후보가 발견되지 않았습니다.")
+        else:
+            st.success(f"후보 {len(_cands)}개 — 실제 타인 화자인 것만 '채택' 열에 O를 적어 저장한 뒤, 위 '추가 타인 화자 목록'에 올리고 실행하세요. (인용문 직전 빈도가 높은 순)")
+            _out = [["후보", "형태", "빈도", "인용문 직전 빈도", "예문", "채택"]]
+            for d in _cands:
+                _out.append([d["후보"], d["형태"], d["빈도"], d["인용문 직전 빈도"], d["예문"], ""])
+            st.dataframe([dict(zip(_out[0], r_)) for r_ in _out[1:]], use_container_width=True)
+            st.download_button("후보 목록 CSV 다운로드", rows_to_csv_bytes(_out), "타인화자_후보.csv", "text/csv")
 
 if uploaded and designated and surname and st.button("실행", type="primary"):
     raw = uploaded.getvalue().decode("utf-8-sig")
@@ -188,6 +224,10 @@ if uploaded and designated and surname and st.button("실행", type="primary"):
     with st.spinner(f"1단계 처리 중... ({len(data)}행)"):
         current_posts = [p.strip() for p in current_posts_input.split(",")] if current_posts_input else []
         temp_abbrev_titles = [p.strip() for p in temp_abbrev_input.split(",")] if temp_abbrev_input else []
+        extra_words = []
+        if extra_file is not None:
+            from speaker_candidates import parse_adopted
+            extra_words = parse_adopted(extra_file.getvalue().decode("utf-8-sig"))
         same_urls = None
         if same_file is not None:
             _sr = list(csv_module.reader(io.StringIO(same_file.getvalue().decode("utf-8-sig"))))
@@ -198,9 +238,13 @@ if uploaded and designated and surname and st.button("실행", type="primary"):
             same_urls = {x[_ui] for x in _sr[1:] if len(x) > _ui and x[_ui]}
         s1_rows, stats = run_stage1(data, header, designated, surname,
                                      current_posts=current_posts, temp_abbrev_titles=temp_abbrev_titles,
+                                     exclude_titles=[p.strip() for p in exclude_input.split(",")] if exclude_input else None,
+                                     extra_other_words=extra_words,
                                      same_urls=same_urls)
     if same_urls is not None:
         msgs.append(f"동성 동호칭 기사 목록 적용: 목록 기사 {len(same_urls):,}건에서만 풀네임 확인 표시")
+    if extra_words:
+        msgs.append(f"추가 타인 화자 {len(extra_words)}개 적용: " + ", ".join(extra_words[:15]) + (" …" if len(extra_words) > 15 else ""))
     msgs.append(f"1단계 완료: {stats}")
     files.append(("중간 결과 다운로드: 1단계", rows_to_csv_bytes(s1_rows), f"{_prefix}_1단계.csv"))
 
