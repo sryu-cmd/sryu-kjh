@@ -1462,6 +1462,11 @@ class Stage1Extractor:
             _o = re.sub(r'[\s.,!?\u2018\u2019\u201c\u201d"\'…·※]+$', '', QUOTE_PAT.sub(' ', _one))
             if not _o.endswith('다'):
                 _heading_q.update(QUOTE_PAT.findall(_one))
+        # 2026-10 추가(편집인 한동훈 674그룹): 바로 앞 행이 '━', '●' 같은 기호만 있는 행이면 이 행은 소제목이다(기호가 따로 한 행으로 떨어진 입력).
+        _pr0 = getattr(self, 'prev_row', None)
+        if _pr0 and re.fullmatch(r'\s*[━●◆■▶▲▼◇□○▷▪─—\-]{1,3}\s*', _pr0.get('f') or '') \
+                and not re.sub(r'[\s.,!?\u2018\u2019\u201c\u201d"\'…·※]+$', '', QUOTE_PAT.sub(' ', f_text)).endswith('다'):
+            _heading_q.update(QUOTE_PAT.findall(f_text))
         # 2026-10 추가(편집인 한동훈 피드백): 인용문 바로 앞뒤 표지로 타인 발언이 확정되는 유형은 조용히 제외한다(점검 불요).
         _sure = self._sure_other_quotes(f_text)
         _heading_q.update(_sure)
