@@ -8,6 +8,7 @@
     kept_quotes, review_flag, review_note = ex.extract_row(f_text)
 """
 import re
+STAGE1_VERSION = '2026-10-27b'
 from title_master_list import BARE_OTHER_NEED_BOUNDARY, TITLE_LIST, PARTY_NAMES, BARE_OTHER_WORDS, COMMON_SURNAMES, SPACE_REQUIRED_SURNAMES, RECEIVED_CONTENT_NOUNS, SELF_ONLY_SHORT_TITLES
 
 QUOTE_PAT = re.compile(r'"[^"]*"|“[^”]*”')
@@ -1458,13 +1459,19 @@ class Stage1Extractor:
                 _heading_q.add(_m.group(0))
         # 2026-10 추가(편집인 강선우 282·286그룹): '● 제목 "인용문"'처럼 ●·▲ 등으로 시작하고 서술어 없이 끝나는 한 줄은 소제목이다.
         _one = f_text.strip()
-        if len(_segs) == 1 and re.match(r'[●◆■▶▲▼◇□○]', _one):
+        if len(_segs) == 1 and re.match(r'[●◆■▶▲▼◇□○━▷▪]', _one):
             _o = re.sub(r'[\s.,!?\u2018\u2019\u201c\u201d"\'…·※]+$', '', QUOTE_PAT.sub(' ', _one))
             if not _o.endswith('다'):
                 _heading_q.update(QUOTE_PAT.findall(_one))
         # 2026-10 추가(편집인 한동훈 674그룹): 바로 앞 행이 '━', '●' 같은 기호만 있는 행이면 이 행은 소제목이다(기호가 따로 한 행으로 떨어진 입력).
+        # 한 셀 안에서 줄바꿈으로 기호 줄(━ 등)과 제목 줄이 이어진 경우도 같다
+        _ls0 = f_text.split('\n')
+        for _li0 in range(1, len(_ls0)):
+            if re.fullmatch(r'[\s\u200b\xa0]*[━●◆■▶▲▼◇□○▷▪─—\-]{1,3}[\s\u200b\xa0]*', _ls0[_li0 - 1]) and _ls0[_li0].strip() \
+                    and not re.sub(r'[\s.,!?\u2018\u2019\u201c\u201d"\'…·※]+$', '', QUOTE_PAT.sub(' ', _ls0[_li0])).endswith('다'):
+                _heading_q.update(QUOTE_PAT.findall(_ls0[_li0]))
         _pr0 = getattr(self, 'prev_row', None)
-        if _pr0 and re.fullmatch(r'\s*[━●◆■▶▲▼◇□○▷▪─—\-]{1,3}\s*', _pr0.get('f') or '') \
+        if _pr0 and re.fullmatch(r'[\s\u200b\xa0]*[━●◆■▶▲▼◇□○▷▪─—\-]{1,3}[\s\u200b\xa0]*', _pr0.get('f') or '') \
                 and not re.sub(r'[\s.,!?\u2018\u2019\u201c\u201d"\'…·※]+$', '', QUOTE_PAT.sub(' ', f_text)).endswith('다'):
             _heading_q.update(QUOTE_PAT.findall(f_text))
         # 2026-10 추가(편집인 한동훈 피드백): 인용문 바로 앞뒤 표지로 타인 발언이 확정되는 유형은 조용히 제외한다(점검 불요).
