@@ -16,9 +16,9 @@ import json
 import csv as csv_module
 
 from stage0_reorder import reorder_by_article
-from stage1_core import Stage1Extractor, QUOTE_PAT as QUOTE_PAT_APP
+from stage1_core import Stage1Extractor, QUOTE_PAT as QUOTE_PAT_APP, STAGE1_VERSION
 from stage2_group_v2 import run_stage2A, run_stage2C
-from stage3_final import run_stage3_final
+from stage3_final import run_stage3_final, STAGE3_VERSION
 from stage4_format import build_stage4_rows
 
 st.set_page_config(page_title="발언 인용문 매직박스 (1~3단계)", layout="wide")
@@ -71,8 +71,9 @@ def run_stage1(data, header, designated, surname, current_posts=None, temp_abbre
         ex.prev_row = _prev_row if (key is not None and _prev_row_key == key) else None
         kept, pc, notes = ex.extract_row(f_text, is_article_first, e_text, article_ctx, r[title_i] if title_i is not None else "")
         _nq = len(QUOTE_PAT_APP.findall(f_text))
-        _prev_row = {'f': f_text, 'state': 'removed' if (_nq and not kept and not pc) else ('kept' if kept and not pc else 'flag')}
-        _prev_row_key = key
+        if f_text.strip():   # 빈 행이 끼어 있어도 앞 문장 정보를 유지한다
+          _prev_row = {'f': f_text, 'state': 'removed' if (_nq and not kept and not pc) else ('kept' if kept and not pc else 'flag')}
+          _prev_row_key = key
         if key is not None and e_text:
             article_ctx += e_text + "\n"
         # 주어가 없거나 대명사가 주어인 문장은 앞 문장의 화자를 이어받는다. 앞 문장이 신원 점검필요였으면 함께 표시한다.
@@ -140,6 +141,7 @@ st.info("1단계(발췌) → 2단계(그루핑) → 3단계(중복제거) 순서
         "사람이 먼저 확인해야 하는 별도 도구(find_ab_c_patterns.py)로 처리하며, 이 앱에는 "
         "포함되어 있지 않습니다.")
 
+st.caption(f"적용된 버전: 1단계 {STAGE1_VERSION} / 3단계 {STAGE3_VERSION} (GitHub에 올린 파일이 반영됐는지 확인용)")
 col1, col2 = st.columns(2)
 with col1:
     designated = st.text_input("지정발언자 이름 (예: 이낙연)")
