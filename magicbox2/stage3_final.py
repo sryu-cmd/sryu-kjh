@@ -12,6 +12,7 @@
    긴 무관한 텍스트에 우연히 담기는 "체인 클러스터링" 오탐을 추가로 방지한다.
 """
 import re
+STAGE3_VERSION = '2026-10-27b'
 import difflib
 from datetime import datetime, timedelta
 from collections import Counter
