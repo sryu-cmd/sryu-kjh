@@ -200,6 +200,8 @@ AB_C_CONTAIN = 0.80
 # 글자 구성만 보는 80% 기준은 순서를 보지 않아, 서로 다른 말이 우연히 비슷한 글자로 이뤄진 경우를
 # 걸러내지 못한다(실제 오탐 2건이 0.27, 0.38이었고 정당한 병합은 모두 0.53 이상이었다).
 AB_C_ORDER_MIN = 0.50
+AB_C_SHORT_CONTAIN = 0.70      # 짧은 조각(8자 이하)의 포함률 기준
+AB_C_SHORT_ORDER_MIN = 0.60    # 짧은 조각의 순서 일치 기준
 AB_C_MIN_RATIO = 0.85
 AB_C_MAX_RATIO = 1.30
 AB_C_LOG = []  # (그룹ID, A, B, C가 있는 그룹들, 길이비)
@@ -241,7 +243,10 @@ def _apply_abc_merges(active, forced, context_min_sim):
             A, B = qs[i], qs[i + 1]
             nA, nB = normalize_keep_order(A), normalize_keep_order(B)
             hits = []
-            if len(nA) > SHORT_LEN and len(nB) > SHORT_LEN:
+            # 2026-10 추가(편집인 한동훈 302/305/306·838/846그룹): 짧은 조각(8자 이하)도 a+b=c 병합에 참여할 수 있다.
+            # 단 둘 다 짧으면 제외하고, 짧은 조각은 포함률 0.70·순서 일치 0.60으로 기준을 달리한다.
+            _shortA, _shortB = len(nA) <= SHORT_LEN, len(nB) <= SHORT_LEN
+            if not (_shortA and _shortB) and len(nA) >= 3 and len(nB) >= 3:
                 for gy in active:
                     if gy is gx or gy['date'] is None:
                         continue
@@ -254,14 +259,15 @@ def _apply_abc_merges(active, forced, context_min_sim):
                         ratio = (len(nA) + len(nB)) / len(nC)
                         if not (AB_C_MIN_RATIO <= ratio <= AB_C_MAX_RATIO):
                             continue
-                        if fuzzy_subset_ratio(nA, nC) < AB_C_CONTAIN or \
-                                fuzzy_subset_ratio(nB, nC) < AB_C_CONTAIN:
+                        if fuzzy_subset_ratio(nA, nC) < (AB_C_SHORT_CONTAIN if _shortA else AB_C_CONTAIN) or \
+                                fuzzy_subset_ratio(nB, nC) < (AB_C_SHORT_CONTAIN if _shortB else AB_C_CONTAIN):
                             continue
                         if not ctx_ok(gx['context'], gy['context']):
                             continue
                         if not _abc_position_ok(nA, nB, nC):
                             continue
-                        if _ordered_cov(nA, nC) < AB_C_ORDER_MIN or _ordered_cov(nB, nC) < AB_C_ORDER_MIN:
+                        if _ordered_cov(nA, nC) < (AB_C_SHORT_ORDER_MIN if _shortA else AB_C_ORDER_MIN) or \
+                                _ordered_cov(nB, nC) < (AB_C_SHORT_ORDER_MIN if _shortB else AB_C_ORDER_MIN):
                             continue
                         hits.append((gy, C, ratio))
             if hits:
@@ -302,49 +308,222 @@ def _apply_abc_merges(active, forced, context_min_sim):
 RESTORE_LOG = []
 
 
-def _restore_pairs(active, rows, idx):
-    """짝 복원(편집인 아이디어, 2026-10): 한 발언문장(F열의 한 줄)에 인용문이 둘 이상 들어 있는 '짝'에서
-    중복제거로 일부만 지워지고 일부는 존속한 경우, 지워진 짝을 그 그룹에 되살린다. 한쪽만 남으면 보충사항과
-    인용문이 어울리지 않기 때문이다. 부분집합으로 지워진 경우도 같다. 되살린 인용문은 이긴 그룹에도 남아 있으므로
-    중복이 생기는 것은 감수한다(점검사유에 표시). 짝 전체가 지워졌으면 건드리지 않는다."""
+def _group_lines(rows, idx):
     gid_i, f_i = idx['그룹ID'], idx['발췌문장']
     f_by_gid = {}
     for r in rows:
         f_by_gid.setdefault(r[gid_i], []).extend(x for x in r[f_i].split('\n') if x.strip())
-    RESTORE_LOG.clear()
+    return f_by_gid
+
+
+def _unit_part_lines(g, lines):
+    """그룹 g의 인용문 단위 k -> [(조각 원문, 그 조각이 들어 있는 발언문장 줄 번호 또는 None)]. a+b=c로 합쳐진 단위는 조각별로 줄을 찾는다."""
+    res = {}
+    for k, q in enumerate(g['quotes']):
+        parts = g.get('merged_idx', {}).get(k, [q])
+        res[k] = []
+        for part in parts:
+            key = part.strip().strip('"')
+            li = None
+            for i, ln in enumerate(lines):
+                if key and key in ln:
+                    li = i
+                    break
+            res[k].append((part, li))
+    return res
+
+
+def _find_loss(g, k):
+    """DEDUP_LOG에서 그룹 g의 단위 k가 어느 그룹(승자)의 어느 인용문에 졌는지 찾는다. 없으면 None."""
+    qt = g['quotes'][k]
+    for e in DEDUP_LOG:
+        if e[2] == g['gid'] and e[4] == qt:
+            return e
+    return None
+
+
+def _joint_subset(active, rows, idx):
+    """공동 부분집합(편집인 한동훈 811그룹): 한 발언문장의 이웃한 두 인용문 A, B가 모두 다른 그룹(±1일)의 '한 인용문' C 안에
+    순서대로 들어 있으면(각 5자 이상, 합이 C의 30% 이상) 둘 다 C의 부분집합이다. 짧은 쪽이 부분집합 하한(12자)에 걸려도
+    짝이 함께 들어 있으므로 중복으로 본다. C가 살아 있을 때만 적용한다."""
+    f_by_gid = _group_lines(rows, idx)
+    for g in active:
+        if g['dead_group'] or g['date'] is None or not any(g['alive']):
+            continue
+        lines = f_by_gid.get(g['gid'], [])
+        pl = _unit_part_lines(g, lines) if lines else {}
+        for k in range(len(g['quotes']) - 1):
+            if k in g.get('merged_idx', {}) or (k + 1) in g.get('merged_idx', {}):
+                continue
+            if not (g['alive'][k] or g['alive'][k + 1]):
+                continue
+            la, lb = pl[k][0][1], pl[k + 1][0][1]
+            if la is None or la != lb:
+                continue
+            nA, nB = normalize_keep_order(g['quotes'][k]), normalize_keep_order(g['quotes'][k + 1])
+            if len(nA) < 5 or len(nB) < 5:
+                continue
+            done = False
+            for gy in active:
+                if done:
+                    break
+                if gy is g or gy['dead_group'] or gy['date'] is None or abs((gy['date'] - g['date']).days) > 1:
+                    continue
+                for ci, C in enumerate(gy['quotes']):
+                    if not gy['alive'][ci]:
+                        continue
+                    nC = normalize_keep_order(C)
+                    if len(nC) <= max(len(nA), len(nB)) or (len(nA) + len(nB)) / len(nC) < MIN_SUBSET_PORTION:
+                        continue
+                    ok = True
+                    pos = []
+                    for nX in (nA, nB):
+                        if nX in nC:
+                            pos.append(nC.find(nX))
+                            continue
+                        if fuzzy_subset_ratio(nX, nC) >= FUZZY_SUBSET_THRESHOLD and _longest_unmatched_run(nX, nC) < UNMATCHED_RUN_MAX:
+                            m_ = difflib.SequenceMatcher(None, nX, nC, autojunk=False).find_longest_match(0, len(nX), 0, len(nC))
+                            pos.append(m_.b)
+                            continue
+                        ok = False
+                        break
+                    if not ok or pos[0] >= pos[1]:
+                        continue
+                    for kk in (k, k + 1):
+                        if g['alive'][kk]:
+                            g['alive'][kk] = False
+                            DEDUP_LOG.append(('공동 부분집합: 같은 문장의 두 인용문이 모두 한 인용문 안에 순서대로 포함', gy['gid'], g['gid'],
+                                              C, g['quotes'][kk], None, None))
+                    done = True
+                    break
+
+
+def _relax_neighbours(active, rows, idx):
+    """이웃 완화(편집인 한동훈 121·690그룹): 한 발언문장에서 인용문 하나가 어떤 그룹 W의 인용문에 중복으로 져서 지워졌는데
+    같은 문장의 다른 인용문이 살아 있으면, 그 인용문을 W의 인용문들과 다시 비교한다. 이때 유사율을 0.70으로 낮추고(순서가
+    맞아야 함), 같은 인용문에 이미 겹친 부분은 빼고 남은 부분과 비교한다."""
+    f_by_gid = _group_lines(rows, idx)
+    gmap = {g['gid']: g for g in active}
     for g in active:
         if g['dead_group'] or all(g['alive']) or not any(g['alive']):
             continue
         lines = f_by_gid.get(g['gid'], [])
         if not lines:
             continue
-        line_of = {}
-        for k, q in enumerate(g['quotes']):
-            parts = g.get('merged_idx', {}).get(k, [q])
-            for part in parts:
-                key = part.strip().strip('"')
-                for li, ln in enumerate(lines):
-                    if key and key in ln:
-                        line_of[k] = li
-                        break
-                if k in line_of:
-                    break
+        pl = _unit_part_lines(g, lines)
         by_line = {}
-        for k, li in line_of.items():
-            by_line.setdefault(li, []).append(k)
-        restored = []
+        for k, parts in pl.items():
+            for _part, li in parts:
+                if li is not None:
+                    by_line.setdefault(li, set()).add(k)
         for li, ks in by_line.items():
+            ks = sorted(ks)
             if len(ks) < 2:
                 continue
-            if any(g['alive'][k] for k in ks) and not all(g['alive'][k] for k in ks):
-                for k in ks:
-                    if not g['alive'][k]:
-                        restored.append(k)
-        if not restored:
+            for ka in [x for x in ks if g['alive'][x]]:
+                if k_dead(g, ka):
+                    continue
+                nQ = normalize_keep_order(g['quotes'][ka])
+                if len(nQ) < 9:
+                    continue
+                for km in [x for x in ks if not g['alive'][x]]:
+                    e = _find_loss(g, km)
+                    if e is None:
+                        continue
+                    nM = normalize_keep_order(g['quotes'][km])
+                    if e[0].startswith('짧은인용') and nM not in normalize_keep_order(e[3]):
+                        continue          # 짧은 인용문은 글자 그대로 포함될 때만 '확인된 중복'으로 본다
+                    W = gmap.get(e[1])
+                    if W is None or W is g:
+                        continue
+                    idxm = next((i_ for i_, c in enumerate(W['quotes']) if c == e[3]), None)
+                    best = None
+                    for ci, C in enumerate(W['quotes']):
+                        if not W['alive'][ci] or W['dead_group']:
+                            continue          # 이미 지워진 인용문은 근거가 되지 못한다(±1일 창 밖의 승자로 연쇄 삭제되는 것을 막음)
+                        if idxm is not None and ((ka > km and ci < idxm) or (ka < km and ci > idxm)):
+                            continue
+                        target = normalize_keep_order(C)
+                        same_c = (ci == idxm)
+                        if same_c:
+                            cov = [False] * len(target)
+                            for blk in difflib.SequenceMatcher(None, nM, target, autojunk=False).get_matching_blocks():
+                                if blk.size >= 2:
+                                    for t in range(blk.b, blk.b + blk.size):
+                                        cov[t] = True
+                            target = ''.join(ch for ch, c_ in zip(target, cov) if not c_)
+                            if len(target) < 6:
+                                continue
+                            sc = _ordered_cov(target, nQ)       # 남은 부분이 이 인용문 안에 순서대로 들어 있는 비율
+                            okk = sc >= RELAX_RATIO and len(nQ) <= 2 * len(target)
+                        else:
+                            if len(target) < 9:
+                                continue
+                            sc = min(_ordered_cov(nQ, target), _ordered_cov(target, nQ))   # 순서까지 보는 양방향 겹침
+                            okk = sc >= RELAX_RATIO
+                        if okk and _longest_unmatched_run(nQ, normalize_keep_order(C)) >= UNMATCHED_RUN_MAX:
+                            okk = False       # 상대에 없는 긴 구절이 들어 있으면(더 긴 쪽이므로) 중복이 아니다
+                        if okk and (best is None or sc > best[0]):
+                            best = (sc, C)
+                    if best is not None:
+                        g['alive'][ka] = False
+                        DEDUP_LOG.append(('이웃 완화: 같은 문장의 인용문이 같은 그룹과 중복으로 확인되어 유사율을 완화(0.70)', W['gid'], g['gid'],
+                                          best[1], g['quotes'][ka], None, None))
+                        break
+
+
+def k_dead(g, k):
+    return not g['alive'][k]
+
+
+RELAX_RATIO = 0.70
+ENABLE_JOINT = True
+ENABLE_RELAX = True
+RESTORE_PARTS = {}
+
+
+def _restore_pairs(active, rows, idx):
+    """짝 복원(편집인 아이디어, 2026-10): 한 발언문장(F열의 한 줄)에 인용문이 둘 이상 들어 있는 '짝'에서
+    중복제거로 일부만 지워지고 일부는 존속한 경우, 지워진 짝을 그 그룹에 되살린다. 한쪽만 남으면 보충사항과
+    인용문이 어울리지 않기 때문이다. 부분집합으로 지워진 경우도 같다. 되살린 인용문은 이긴 그룹에도 남아 있으므로
+    중복이 생기는 것은 감수한다(점검사유에 표시). 짝 전체가 지워졌으면 건드리지 않는다.
+    2026-10(편집인 한동훈 175그룹): a+b=c로 합쳐진 단위는 두 조각이 서로 다른 줄에 걸칠 수 있다. 조각별로 줄을 찾아,
+    살아 있는 짝이 있는 줄의 조각만 되살린다(짝이 없는 줄의 조각은 되살리지 않는다)."""
+    f_by_gid = _group_lines(rows, idx)
+    RESTORE_LOG.clear()
+    for g in active:
+        g['restored_parts'] = {}
+        if g['dead_group'] or all(g['alive']) or not any(g['alive']):
             continue
-        winners = []
-        for k in restored:
+        lines = f_by_gid.get(g['gid'], [])
+        if not lines:
+            continue
+        pl = _unit_part_lines(g, lines)
+        by_line = {}
+        for k, parts in pl.items():
+            for part, li in parts:
+                if li is not None:
+                    by_line.setdefault(li, []).append((k, part))
+        restore_map = {}   # k -> 되살릴 조각들
+        for li, items in by_line.items():
+            units = {k for k, _p in items}
+            if len(units) < 2:
+                continue
+            alive_u = [k for k in units if g['alive'][k]]
+            if not alive_u:
+                continue
+            for k, part in items:
+                if not g['alive'][k]:
+                    restore_map.setdefault(k, []).append(part)
+        if not restore_map:
+            continue
+        restored, winners = [], []
+        for k, parts in restore_map.items():
             g['alive'][k] = True
+            restored.append(k)
+            if k in g.get('merged_idx', {}):
+                order = list(g['merged_idx'][k])
+                g['restored_parts'][k] = [p_ for p_ in order if p_ in parts]
             qt = g['quotes'][k]
             for e in list(DEDUP_LOG):
                 if e[2] == g['gid'] and e[4] == qt:
@@ -546,6 +725,10 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
     pairwise_pass(flat, containment_only=False)
     sync_alive(flat)
 
+    if ENABLE_JOINT:
+        _joint_subset(active, rows, idx)
+    if ENABLE_RELAX:
+        _relax_neighbours(active, rows, idx)
     if restore_pairs:
         _restore_pairs(active, rows, idx)
     else:
@@ -704,7 +887,7 @@ def run_stage3_final(rows, header, threshold=0.8, context_min_sim=0.15,
                     if not a:
                         continue
                     if k in g.get('merged_idx', {}):
-                        surviving.extend(g['merged_idx'][k])   # 합친 글이 아니라 원래의 두 인용문
+                        surviving.extend(g.get('restored_parts', {}).get(k) or g['merged_idx'][k])   # 합친 글이 아니라 원래의 두 인용문(짝 복원은 일부 조각만)
                     else:
                         surviving.append(q)
             new_row = r[:]
