@@ -8,7 +8,7 @@
     kept_quotes, review_flag, review_note = ex.extract_row(f_text)
 """
 import re
-STAGE1_VERSION = '2026-10-27b'
+STAGE1_VERSION = '2026-10-27c'
 from title_master_list import BARE_OTHER_NEED_BOUNDARY, TITLE_LIST, PARTY_NAMES, BARE_OTHER_WORDS, COMMON_SURNAMES, SPACE_REQUIRED_SURNAMES, RECEIVED_CONTENT_NOUNS, SELF_ONLY_SHORT_TITLES
 
 QUOTE_PAT = re.compile(r'"[^"]*"|“[^”]*”')
@@ -1259,10 +1259,11 @@ class Stage1Extractor:
                 return True
         return False
 
-    def _prev_subject(self, ctx):
+    def _prev_subject(self, ctx, chain=False):
         """앞 문장들을 거슬러 올라가며(대명사 주어 문장은 건너뜀) 주어가 타인으로 확정이면 ('other', 이름), 지정발언자면 ('designated', ''),
         불확실하면 (None, '')."""
-        sents = [x for x in re.split(r'(?<=다)\.\s+|\n+', ctx.strip()) if x.strip()]
+        ctx = QUOTE_PAT.sub(lambda m_: m_.group(0).replace('. ', '.\u2024').replace('\n', ' '), ctx.strip())  # 인용문 속 마침표·줄바꿈에서 문장이 갈라지지 않게
+        sents = [x for x in re.split(r'(?<=다)\.\s+|\n+', ctx) if x.strip()]
         for sent in reversed(sents[-6:]):
             if re.match(r'\s*(?:그는|그가|그녀는|그녀가|그들은|그들이|이들은|이들이)\s', sent):
                 continue
@@ -1290,6 +1291,8 @@ class Stage1Extractor:
                 return ('other', sorted(oth)[0][1])
             if des:
                 return ('designated', '')
+            if chain and QUOTE_PAT.search(sent):
+                continue  # 주어 없는 발언문장은 건너뛰고 그 앞의 주어를 찾는다(주어 승계 사슬)
             return (None, '')
         return (None, '')
 
@@ -1511,6 +1514,7 @@ class Stage1Extractor:
         #  ① 앞 문장의 주어가 (지정발언자 아닌) 타인으로 확정이면 이 문장의 인용문도 타인 발언 -> 조용히 제외
         #  ② '그러면서 "…"'처럼 주어 생략 + 연결어로 시작하고, 바로 앞 인용문이 자동제외됐으면 이 인용문도 제외
         self._silent_notes = []
+        _subjless = []
         if kept:
             _qm = list(QUOTE_PAT.finditer(f_text))
             _gone = set()
@@ -1548,6 +1552,37 @@ class Stage1Extractor:
                     if not self._has_named_subject(_lead) and not self._has_named_subject(self._mask_single_quoted(_after)) \
                             and self._prev_row_removed(f_text, _ss):
                         _who = '앞 문장(바로 앞 행)의 제외 판정을 주어 생략으로 승계'
+                if not _who and _q not in getattr(self, '_sure_keep', set()) and not (_ss == 0 and is_article_first):
+                    # 2026-10-27 편집인 규칙: 문장에 명시된 주어가 없는 발언문장
+                    #  (1)(2) 앞 문장이 지정발언자의 발언/주어 -> 지정발언자(발췌, 조용히)  (4) 앞 문장 주어가 타인 -> 제외(조용히)
+                    #  (5) 그 밖 -> 발췌 + 점검필요.   그는·그가·그녀는 = 앞 주어 승계, 그들은·이들은 = 단독으로는 지정발언자로 보지 않음
+                    _fq = QUOTE_PAT.sub(lambda m_: ' ' * len(m_.group(0)), f_text)
+                    _b1 = _fq.rfind('\n', 0, _m.start())
+                    _b2 = _fq.rfind('다. ', 0, _m.start())
+                    _ss = max(_b1 + 1 if _b1 >= 0 else 0, _b2 + 3 if _b2 >= 0 else 0)
+                    _pre = f_text[_ss:_m.start()].replace('\u200b', '')
+                    _pre_m = self._mask_single_quoted(QUOTE_PAT.sub(' ', _pre))
+                    _se = _fq.find('\n', _m.end())
+                    _se2 = _fq.find('다. ', _m.end())
+                    _ends = [x_ for x_ in (_se, _se2 + 1 if _se2 >= 0 else -1) if x_ >= 0]
+                    _sent_all = f_text[_ss:(min(_ends) if _ends else len(f_text))]
+                    _sent_m = self._mask_single_quoted(QUOTE_PAT.sub(' ', _sent_all)).replace('\u200b', '')
+                    _pm_ = _PRON.match(_pre)
+                    _grp = bool(_pm_ and re.match(r'\s*(?:그들|이들)', _pre))
+                    _has_subj = self._has_named_subject(_sent_m) or (self.designated in _sent_m)
+                    if not _has_subj and not _pm_:
+                        _has_subj = bool(re.search(r'(?<![가-힣])(?!(?:이|그|저|것|이것|그것|이는|그는|이에|그에|또|더|를|을)(?:은|는|이|가)?\s)[가-힣A-Za-z0-9·]{2,}(?:은|는|이|가)\s', _sent_m))
+                    if not _has_subj:
+                        _ctx = self._article_ctx[-1500:] + '\n' + self._e_before_f + f_text[:_ss]
+                        _kind, _nm = self._prev_subject(_ctx, chain=True)
+                        _pr = getattr(self, 'prev_row', None) or {}
+                        if _kind is None and _ss == 0 and _pr.get('state') == 'kept':
+                            _kind = 'designated'
+                        # 앞 문장 주어가 타인으로 보이는 경우도 자동 제외하지 않고(앞 문장 주어 판독 오류 시 본인 발언 누락 위험) 점검필요로 남긴다
+                        if _kind == 'designated' and not _grp:
+                            pass
+                        else:
+                            _subjless.append(_q)
                 if _who:
                     _gone.add(_q)
                     self._silent_notes.append(_who + '하여 타인 발언으로 판정(점검 불요)')
@@ -1832,6 +1867,9 @@ class Stage1Extractor:
                 _mk9 = _mk9[:_qs9] + ' ' * (_qe9 - _qs9) + _mk9[_qe9:]
             if self.EXCL_TITLE_OTHER_PAT.search(_mk9):
                 return kept, '', '이 인물이 가질 수 없는 호칭(' + self.EXCL_TITLE_OTHER_PAT.search(_mk9).group(0).strip() + ')이 발화주어여서 타인 발언으로 확정됨(점검불요)'
+        _sj = [q_ for q_ in _subjless if q_ in kept]
+        if _sj and kept:
+            reasons.append('!!주어 없음 - 앞 문장에서 화자(지정발언자 여부)를 확인할 수 없어 발췌함 - 확인 필요!!')
         point_check = '점검필요' if reasons else ''
         final_notes = '; '.join(reasons) if reasons else '; '.join(x for x in [locals().get('silent_reason') or ''] + list(dict.fromkeys(self._silent_notes)) if x)
         return kept, point_check, final_notes
