@@ -1442,7 +1442,7 @@ class Stage1Extractor:
         orig_quotes = QUOTE_PAT.findall(f_text)
         # 2026년 추가(편집인 제안, 김용민 247·287그룹): 빈 줄(문단 나눔)로 떨어져 있는 앞 토막이 서술어 없이 끝나면
         # (인용문으로 끝나거나 '● 제목 "인용문" 제목'처럼 서술어가 없는 경우) 기사 제목·소제목이므로 그 안의 인용문은 발췌하지 않고 점검도 붙이지 않는다.
-        _segs = re.split(r'\n[ \t]*\n', f_text)
+        _segs = re.split(r'\n[ \t\u200b\xa0]*\n', f_text)
         _heading_q = set()
         if len(_segs) >= 2:
             for _si, _sg in enumerate(_segs[:-1]):
