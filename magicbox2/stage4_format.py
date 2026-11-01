@@ -73,6 +73,8 @@ def build_stage4_rows(final_rows):
         quotes = (first[h_i] or '').strip()
         if not quotes:
             continue
+        if not re.fullmatch(r'\d+', str(g).strip()):
+            continue  # 오피니언(사설·칼럼 등) 그룹은 4단계에서 제외한다(편집인 방침, 점검필요 표시 없이 삭제)
         parts = [q for q in re.findall(r'"[^"]*"|“[^”]*”', quotes)]
         joined = '  ‖  '.join(parts) if parts else quotes
         note = first[rs_i] if len(first) > rs_i else ''
