@@ -4,6 +4,7 @@
 - 인접성 불인정 -> 바로 '분절' (미처리로 보내지 않음)
 - 소제목 마커, 병합/분절 접속사 신호
 """
+from opinion_detect import opinion_term
 import re
 from title_master_list import PARTY_NAMES
 
@@ -165,6 +166,7 @@ def run_stage2C(rows, header):
 
     out_header = header + ['그룹ID']
     out_rows = [out_header]
+    title_i, url_i = idx.get('제목'), idx.get('URL')
 
     gid = 0
     cur_group_rows = []
@@ -195,6 +197,13 @@ def run_stage2C(rows, header):
         cur_group_rows = []
 
     for r in rows:
+        # 의견 기사(사설·칼럼·시론·오피니언 등): 병합하지 않고 한 행을 한 그룹으로 두며, 그룹ID 자리에 번호 대신 그 신문사가
+        # 쓰는 용어를 적는다. 3단계(중복제거)·4단계(보충사항)에서 열외로 다루기 위한 표시다. (편집인 방침, 2026년)
+        term = opinion_term(r[title_i] if title_i is not None else '', r[url_i] if url_i is not None else '')
+        if term:
+            flush()
+            out_rows.append(r + [term])
+            continue
         label = r[label_i]
         if label == '병합' and cur_group_rows:
             cur_group_rows.append(r)
